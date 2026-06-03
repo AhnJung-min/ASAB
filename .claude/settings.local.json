@@ -45,7 +45,13 @@
       "Bash(echo \"user.email: $\\(git config --global user.email\\)\")",
       "Bash(git init *)",
       "Bash(git add *)",
-      "Bash(grep -iE \"config\\\\.yaml$|token|\\\\.db$\")"
+      "Bash(grep -iE \"config\\\\.yaml$|token|\\\\.db$\")",
+      "Bash(git commit -q -m ' *)",
+      "Bash(git remote *)",
+      "Bash(git push *)",
+      "Bash(py -m src.universe)",
+      "Bash(py -m compileall -q src/collect.py src/universe.py src/data/store.py)",
+      "Bash(py -m src.collect --source master --limit 2 --months 120)"
     ]
   }
 }

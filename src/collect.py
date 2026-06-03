@@ -52,33 +52,64 @@ def backfill_daily(md: MarketData, store: DataStore, symbol: str, months: int) -
     return total
 
 
-def run(top: int, months: int) -> None:
+def _build_universe(md: MarketData, store: DataStore, source: str, top: int,
+                    limit: int | None) -> list[dict]:
+    """수집 대상 유니버스 구성.
+    source='master': 종목 마스터(ETF 제외 개별주 전체). source='volume': 거래대금 상위.
+    """
+    if source == "master":
+        rows = store.master_symbols()
+        if not rows:
+            log("종목 마스터가 비어 있습니다. 먼저 `python -m src.universe` 실행 필요.")
+            return []
+        if limit:
+            rows = rows[:limit]
+        return rows
+    # volume
+    today = datetime.now().strftime("%Y%m%d")
+    universe = md.volume_rank(by_value=True, top=top)
+    store.save_universe(today, universe)
+    return universe
+
+
+def run(source: str, top: int, months: int, limit: int | None,
+        skip_existing: bool, with_extras: bool) -> None:
     cfg = load_config()
     client = KISClient(cfg)
     md = MarketData(client)
     store = DataStore()
 
-    today = datetime.now().strftime("%Y%m%d")
-    log(f"유니버스 조회: 거래대금 상위 {top}종목")
-    universe = md.volume_rank(by_value=True, top=top)
-    store.save_universe(today, universe)
-    log(f"  유니버스 {len(universe)}종목 저장")
+    log(f"유니버스 구성 (source={source})")
+    universe = _build_universe(md, store, source, top, limit)
+    if not universe:
+        store.close()
+        return
+    log(f"  대상 {len(universe)}종목 · 일봉 {months}개월 백필 시작")
 
+    # 스킵 기준: 이미 충분한 일봉이 있으면 건너뜀(재개용)
+    min_rows = int(months * 18)  # 월 ~18영업일
+    done = 0
     for i, item in enumerate(universe, 1):
         sym, name = item["symbol"], item["name"]
+        if skip_existing and len(store.get_daily(sym)) >= min_rows:
+            continue
         try:
             n_daily = backfill_daily(md, store, sym, months)
-            inv = md.investor_flow(sym)
-            store.save_investor(sym, inv)
-            fin = md.financial_ratio(sym)
-            if fin:
-                store.save_financial(sym, fin)
-            log(f"  [{i}/{len(universe)}] {name}({sym}): 일봉 {n_daily}건, 투자자 {len(inv)}건")
+            extra = ""
+            if with_extras:
+                inv = md.investor_flow(sym)
+                store.save_investor(sym, inv)
+                fin = md.financial_ratio(sym)
+                if fin:
+                    store.save_financial(sym, fin)
+                extra = f", 투자자 {len(inv)}건"
+            done += 1
+            if i % 25 == 0 or n_daily == 0:
+                log(f"  [{i}/{len(universe)}] {name}({sym}): 일봉 {n_daily}건{extra}")
         except KISApiError as e:
             log(f"  [{i}/{len(universe)}] {name}({sym}): API 오류 {e}")
-        time.sleep(0.1)  # 추가 여유 (클라이언트 스로틀과 별개)
 
-    log("수집 완료. 저장 현황:")
+    log(f"수집 완료 (이번에 {done}종목 처리). 저장 현황:")
     for k, v in store.stats().items():
         log(f"  {k}: {v:,}")
     store.close()
@@ -93,16 +124,24 @@ def show_stats() -> None:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="KIS 학습용 데이터 수집기")
-    ap.add_argument("--top", type=int, default=30, help="유니버스 종목 수 (거래대금 상위)")
-    ap.add_argument("--months", type=int, default=12, help="일봉 백필 개월 수")
+    ap = argparse.ArgumentParser(description="KIS 학습용 데이터 수집기 (국내)")
+    ap.add_argument("--source", choices=["master", "volume"], default="master",
+                    help="master=개별주 전체(ETF제외), volume=거래대금 상위")
+    ap.add_argument("--top", type=int, default=30, help="[volume] 유니버스 종목 수")
+    ap.add_argument("--months", type=int, default=120, help="일봉 백필 개월 수 (기본 10년)")
+    ap.add_argument("--limit", type=int, default=None, help="[master] 처리 종목 수 제한")
+    ap.add_argument("--skip-existing", action="store_true",
+                    help="이미 충분한 일봉이 있는 종목은 건너뜀 (재개용)")
+    ap.add_argument("--with-extras", action="store_true",
+                    help="투자자동향·재무비율도 함께 수집")
     ap.add_argument("--stats", action="store_true", help="저장 현황만 출력")
     args = ap.parse_args()
 
     if args.stats:
         show_stats()
     else:
-        run(args.top, args.months)
+        run(args.source, args.top, args.months, args.limit,
+            args.skip_existing, args.with_extras)
 
 
 if __name__ == "__main__":
