@@ -1,0 +1,33 @@
+# 한국투자증권 Open API 설정 (모의투자)
+# 1) https://apiportal.koreainvestment.com 에서 모의투자용 앱을 등록하고
+#    APP KEY / APP SECRET 을 발급받으세요.
+# 2) 모의투자 계좌번호(8자리-2자리)는 KIS 영업점/HTS에서 개설한 모의계좌 번호입니다.
+# 3) 이 파일을 config.yaml 로 복사한 뒤 값을 채우세요. (config.yaml 은 git 에 올라가지 않음)
+
+# 모의투자: true / 실전투자: false  (지금은 반드시 true 로 시작)
+paper_trading: true
+
+app_key: "여기에_APP_KEY"
+app_secret: "여기에_APP_SECRET"
+
+# 계좌번호 종합(앞 8자리)
+account_no: "50000000"
+# 계좌 상품코드(뒤 2자리). 주식: 01
+account_product_code: "01"
+
+# 자동매매 설정
+trading:
+  # 감시 종목 (국내: 6자리 종목코드 / 해외: 거래소+심볼)
+  domestic_symbols: ["005930", "000660"]   # 삼성전자, SK하이닉스
+  overseas_symbols:                          # 미국 주식 예시
+    - { exchange: "NAS", symbol: "AAPL" }
+    - { exchange: "NAS", symbol: "TSLA" }
+
+  poll_interval_sec: 10      # 시세 확인 주기(초)
+  order_qty: 1               # 1회 주문 수량
+  max_position_per_symbol: 5 # 종목당 최대 보유 수량
+
+strategy:
+  name: "sma_cross"          # 단순이동평균 교차 전략
+  short_window: 5
+  long_window: 20

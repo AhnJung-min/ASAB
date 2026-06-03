@@ -1,0 +1,16 @@
+# 비밀 정보 - 절대 커밋 금지
+config.yaml
+*.token.json
+.token_cache/
+token_*.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.log
+
+# 수집 데이터 (재생성 가능, 용량 큼)
+data/*.db
+.token_cache/
