@@ -14,3 +14,6 @@ venv/
 # 수집 데이터 (재생성 가능, 용량 큼)
 data/*.db
 .token_cache/
+
+# Claude 로컬 설정 (개인 환경, 추적 제외)
+.claude/settings.local.json
