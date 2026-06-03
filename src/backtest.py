@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import argparse
+import bisect
 import math
 import sys
 from typing import Any
@@ -48,6 +49,8 @@ def run_backtest(
     hold_days: int = 20,
     cost_bps: float = 25.0,
     require_financials: bool = True,
+    regime_filter: bool = False,
+    regime_ma: int = 200,
 ) -> dict[str, Any]:
     series = _load_series(store)
     if not series:
@@ -80,7 +83,27 @@ def run_backtest(
         s: {r["date"]: i for i, r in enumerate(series[s])} for s in pool
     }
 
+    # --- 시장국면(레짐) 사전계산: 지수가 N일 이동평균 위면 risk-on(투자) ---
+    # 미래정보 누출 방지: t시점 판단은 t 이하의 지수 종가만 사용.
+    regime_on: dict[str, bool] = {}
+    has_regime = regime_filter and BENCHMARK_SYMBOL in series and len(series[BENCHMARK_SYMBOL]) >= regime_ma
+    if has_regime:
+        bdates = [r["date"] for r in series[BENCHMARK_SYMBOL]]
+        bcloses = [r["close"] for r in series[BENCHMARK_SYMBOL]]
+        for t in dates:
+            pos = bisect.bisect_right(bdates, t) - 1  # t 이하 마지막 지수 거래일
+            if pos >= regime_ma - 1:
+                sma = sum(bcloses[pos - regime_ma + 1: pos + 1]) / regime_ma
+                regime_on[t] = bcloses[pos] > sma
+            else:
+                regime_on[t] = True  # 워밍업 구간은 투자 허용
+
+    def is_risk_on(t: str) -> bool:
+        return regime_on.get(t, True) if has_regime else True
+
     cost = cost_bps / 10_000.0
+    in_market_days = 0
+    span_days = 0
     equity = 1.0
     bench_equity = 1.0
     curve: list[dict] = []
@@ -111,12 +134,14 @@ def run_backtest(
         ranked = assign_scores(candidates)
         picks = [c["symbol"] for c in ranked[:top_n]]
 
-        # 회전율 기반 거래비용 (교체된 비중만큼)
-        if prev_holdings:
-            turnover = len(set(picks) ^ set(prev_holdings)) / max(len(picks), 1)
-            equity *= (1 - cost * turnover)
-        else:
-            equity *= (1 - cost)  # 최초 진입
+        # 시장국면 필터: risk-off 면 현금 보유(picks 비움)
+        if not is_risk_on(t):
+            picks = []
+
+        # 회전율 기반 거래비용 (교체된 비중만큼, 0~1 정규화)
+        denom = max(len(picks), len(prev_holdings), 1)
+        turnover = len(set(picks) ^ set(prev_holdings)) / denom
+        equity *= (1 - cost * turnover)
         prev_holdings = picks
 
         holdings_log.append({"date": t, "picks": picks,
@@ -152,18 +177,28 @@ def run_backtest(
                     bench_last = bc
             curve.append({"date": d, "strategy": prev_port, "benchmark": prev_bench})
 
+        window = j_end - i
+        span_days += window
+        if picks:
+            in_market_days += window
+
         equity = prev_port
         bench_equity = prev_bench
         i = j_end if j_end > i else i + 1
 
     metrics = _metrics(curve)
+    metrics["time_in_market"] = (in_market_days / span_days) if span_days else 1.0
     return {
         "curve": curve,
         "metrics": metrics,
         "holdings_log": holdings_log,
-        "params": {"top_n": top_n, "hold_days": hold_days, "cost_bps": cost_bps},
+        "params": {
+            "top_n": top_n, "hold_days": hold_days, "cost_bps": cost_bps,
+            "regime_filter": regime_filter, "regime_ma": regime_ma,
+        },
         "pool_size": len(pool),
         "has_benchmark": BENCHMARK_SYMBOL in series,
+        "regime_applied": has_regime,
     }
 
 
@@ -207,12 +242,16 @@ def main() -> None:
     ap.add_argument("--hold-days", type=int, default=20)
     ap.add_argument("--cost-bps", type=float, default=25.0)
     ap.add_argument("--include-etf", action="store_true")
+    ap.add_argument("--regime-filter", action="store_true",
+                    help="지수 이동평균 아래면 현금 보유(시장국면 필터)")
+    ap.add_argument("--regime-ma", type=int, default=200, help="국면 판정 이동평균 일수")
     args = ap.parse_args()
 
     store = DataStore()
     res = run_backtest(
         store, top_n=args.top_n, hold_days=args.hold_days,
         cost_bps=args.cost_bps, require_financials=not args.include_etf,
+        regime_filter=args.regime_filter, regime_ma=args.regime_ma,
     )
     store.close()
 
@@ -220,12 +259,14 @@ def main() -> None:
         print(res["error"])
         return
     m = res["metrics"]
-    print(f"대상 종목 풀: {res['pool_size']}개 / {res['params']}")
+    rf = "ON" if res["params"]["regime_filter"] else "OFF"
+    print(f"대상 종목 풀: {res['pool_size']}개 / 국면필터 {rf}(적용={res['regime_applied']})")
     print(f"누적수익률 : {m['total_return']*100:+.1f}%  (벤치마크 {m['bench_return']*100:+.1f}%)")
     print(f"CAGR       : {m['cagr']*100:+.1f}%")
     print(f"샤프지수   : {m['sharpe']:.2f}")
     print(f"최대낙폭   : {m['mdd']*100:.1f}%")
     print(f"연변동성   : {m['volatility']*100:.1f}%")
+    print(f"투자기간비율: {m['time_in_market']*100:.0f}%  (나머지는 현금)")
 
 
 if __name__ == "__main__":

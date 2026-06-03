@@ -86,8 +86,11 @@ class DataStore:
     def __init__(self, path: str | Path = DB_PATH):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(self.path)
+        self.conn = sqlite3.connect(self.path, timeout=30)
         self.conn.row_factory = sqlite3.Row
+        # 동시 접근(수집기+대시보드+백테스트) 안정성
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA busy_timeout=30000")
         self._migrate()
         self.conn.executescript(_SCHEMA)
         self.conn.commit()
