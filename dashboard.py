@@ -59,11 +59,13 @@ def get_screener(include_etf: bool) -> list[dict]:
 
 
 @st.cache_data(ttl=300)
-def get_backtest(top_n: int, hold_days: int, cost_bps: float, include_etf: bool) -> dict:
+def get_backtest(top_n: int, hold_days: int, cost_bps: float, include_etf: bool,
+                 regime_filter: bool) -> dict:
     with open_store() as store:
         return run_backtest(
             store, top_n=top_n, hold_days=hold_days,
             cost_bps=cost_bps, require_financials=not include_etf,
+            regime_filter=regime_filter,
         )
 
 
@@ -112,6 +114,8 @@ top_n = st.sidebar.slider("보유 종목 수 (top N)", 1, 10, 3)
 hold_days = st.sidebar.slider("리밸런스 주기 (영업일)", 5, 60, 20, step=5)
 cost_bps = st.sidebar.slider("거래비용 (bps)", 0, 100, 25, step=5)
 include_etf = st.sidebar.checkbox("ETF/ETN 포함", value=False)
+regime_filter = st.sidebar.checkbox("시장국면 필터 (지수 200일선)", value=False,
+                                    help="지수가 200일선 아래면 현금 보유 → 하락장 회피")
 
 st.sidebar.subheader("실시간")
 auto = st.sidebar.checkbox("자동 새로고침", value=False)
@@ -128,18 +132,20 @@ tab_bt, tab_screen, tab_acct, tab_data = st.tabs(
 
 # --- 백테스트 탭 -----------------------------------------------------------
 with tab_bt:
-    res = get_backtest(top_n, hold_days, float(cost_bps), include_etf)
+    res = get_backtest(top_n, hold_days, float(cost_bps), include_etf, regime_filter)
     if "error" in res:
         st.warning(res["error"])
     else:
         m = res["metrics"]
-        c1, c2, c3, c4, c5 = st.columns(5)
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
         c1.metric("누적수익률", f"{m['total_return']*100:+.1f}%",
                   f"vs 벤치 {(m['total_return']-m['bench_return'])*100:+.1f}%p")
         c2.metric("CAGR", f"{m['cagr']*100:+.1f}%")
         c3.metric("샤프지수", f"{m['sharpe']:.2f}")
         c4.metric("최대낙폭", f"{m['mdd']*100:.1f}%")
         c5.metric("연변동성", f"{m['volatility']*100:.1f}%")
+        c6.metric("투자기간", f"{m.get('time_in_market', 1)*100:.0f}%",
+                  "국면필터 ON" if res["params"].get("regime_filter") else "필터 OFF")
 
         df = pd.DataFrame(res["curve"])
         df["date"] = pd.to_datetime(df["date"], format="%Y%m%d")
