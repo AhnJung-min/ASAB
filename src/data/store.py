@@ -53,7 +53,8 @@ CREATE TABLE IF NOT EXISTS stock_master (
     symbol TEXT PRIMARY KEY,
     name   TEXT,
     market TEXT,        -- KOSPI | KOSDAQ
-    group_code TEXT     -- ST(주권) 등
+    group_code TEXT,    -- ST(주권) 등
+    liquidity REAL      -- 시가총액(억원). 수집 우선순위/품질 기준
 );
 -- 급등주 스캔 스냅샷 (학습용 누적)
 CREATE TABLE IF NOT EXISTS surge_scan (
@@ -104,6 +105,14 @@ class DataStore:
             cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(account_snapshot)")}
             if "cash_krw" not in cols:  # 구 스키마
                 self.conn.execute("DROP TABLE account_snapshot")
+                self.conn.commit()
+        # stock_master.liquidity 컬럼 추가(구 DB 보강)
+        cur = self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='stock_master'")
+        if cur.fetchone():
+            mcols = {r["name"] for r in self.conn.execute("PRAGMA table_info(stock_master)")}
+            if "liquidity" not in mcols:
+                self.conn.execute("ALTER TABLE stock_master ADD COLUMN liquidity REAL")
                 self.conn.commit()
 
     def close(self) -> None:
@@ -190,15 +199,25 @@ class DataStore:
         self.conn.commit()
         return len(rows)
 
-    def master_symbols(self, market: str | None = None) -> list[dict[str, Any]]:
+    def master_symbols(self, market: str | None = None,
+                       by_liquidity: bool = False) -> list[dict[str, Any]]:
+        # 유동성(시가총액) 내림차순: NULL(미조사)은 뒤로
+        order = "ORDER BY liquidity IS NULL, liquidity DESC" if by_liquidity else "ORDER BY symbol"
         if market:
             cur = self.conn.execute(
-                "SELECT symbol,name,market FROM stock_master WHERE market=? ORDER BY symbol",
+                f"SELECT symbol,name,market,liquidity FROM stock_master WHERE market=? {order}",
                 (market,))
         else:
             cur = self.conn.execute(
-                "SELECT symbol,name,market FROM stock_master ORDER BY symbol")
+                f"SELECT symbol,name,market,liquidity FROM stock_master {order}")
         return [dict(r) for r in cur.fetchall()]
+
+    def set_master_liquidity(self, values: list[tuple[float, str]]) -> int:
+        """[(liquidity, symbol), ...] 일괄 갱신."""
+        self.conn.executemany(
+            "UPDATE stock_master SET liquidity=? WHERE symbol=?", values)
+        self.conn.commit()
+        return len(values)
 
     # --- 급등주 스캔/매매 ---------------------------------------------------
     def save_surge_scan(self, ts: str, rows: Iterable[dict[str, Any]]) -> int:

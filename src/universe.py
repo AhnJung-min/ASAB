@@ -90,13 +90,47 @@ def build(store: DataStore | None = None) -> list[dict]:
     return stocks
 
 
+def rank_liquidity(store: DataStore, log_every: int = 100) -> None:
+    """모든 개별주의 시가총액을 조회해 stock_master.liquidity 갱신(수집 우선순위용)."""
+    from datetime import datetime
+    from .kis.client import KISApiError, KISClient
+    from .kis.config import load_config
+    from .kis.marketdata import MarketData
+
+    md = MarketData(KISClient(load_config()))
+    rows = store.master_symbols()
+    total = len(rows)
+    batch: list[tuple[float, str]] = []
+    for i, r in enumerate(rows, 1):
+        try:
+            cap = md.market_cap(r["symbol"])
+        except KISApiError:
+            cap = 0
+        batch.append((float(cap), r["symbol"]))
+        if len(batch) >= 50:
+            store.set_master_liquidity(batch)
+            batch = []
+        if i % log_every == 0:
+            ts = datetime.now().strftime("%H:%M:%S")
+            print(f"[{ts}] 시가총액 조사 {i}/{total} ...", flush=True)
+    if batch:
+        store.set_master_liquidity(batch)
+    print(f"시가총액 조사 완료: {total}종목. 이제 collect 가 대형주부터 수집합니다.", flush=True)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="국내 종목 유니버스 빌더")
     ap.add_argument("--all-groups", action="store_true",
                     help="ST 외 그룹도 모두 저장(분포 확인용)")
+    ap.add_argument("--liquidity", action="store_true",
+                    help="개별주 시가총액 조사 → 수집 우선순위(대형주 우선) 설정")
     args = ap.parse_args()
 
     store = DataStore()
+    if args.liquidity:
+        rank_liquidity(store)
+        store.close()
+        return
     if args.all_groups:
         rows = []
         for m in MASTERS:
