@@ -90,8 +90,11 @@ def build(store: DataStore | None = None) -> list[dict]:
     return stocks
 
 
-def rank_liquidity(store: DataStore, log_every: int = 100) -> None:
-    """모든 개별주의 시가총액을 조회해 stock_master.liquidity 갱신(수집 우선순위용)."""
+def rank_liquidity(store: DataStore, log_every: int = 100, rescan: bool = False) -> None:
+    """모든 개별주의 시가총액을 조회해 stock_master.liquidity 갱신(수집 우선순위용).
+
+    rescan=False 면 이미 시총이 있는 종목은 건너뜀(중단 후 빠른 재개).
+    """
     from datetime import datetime
     from .kis.client import KISApiError, KISClient
     from .kis.config import load_config
@@ -102,11 +105,15 @@ def rank_liquidity(store: DataStore, log_every: int = 100) -> None:
     total = len(rows)
     batch: list[tuple[float, str]] = []
     for i, r in enumerate(rows, 1):
+        if not rescan and r.get("liquidity") is not None:
+            continue  # 이미 조사됨 → 건너뜀(재개)
         try:
             cap = md.market_cap(r["symbol"])
         except KISApiError:
             cap = 0
         batch.append((float(cap), r["symbol"]))
+        store.add_collect_log(datetime.now().strftime("%H:%M:%S"), "liquidity",
+                              r["symbol"], r["name"], f"시총 {cap/10000:,.1f}조 ({i}/{total})")
         if len(batch) >= 50:
             store.set_master_liquidity(batch)
             batch = []
@@ -124,11 +131,13 @@ def main() -> None:
                     help="ST 외 그룹도 모두 저장(분포 확인용)")
     ap.add_argument("--liquidity", action="store_true",
                     help="개별주 시가총액 조사 → 수집 우선순위(대형주 우선) 설정")
+    ap.add_argument("--rescan", action="store_true",
+                    help="[liquidity] 이미 조사된 종목도 다시 조사")
     args = ap.parse_args()
 
     store = DataStore()
     if args.liquidity:
-        rank_liquidity(store)
+        rank_liquidity(store, rescan=args.rescan)
         store.close()
         return
     if args.all_groups:

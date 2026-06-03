@@ -134,6 +134,21 @@ def collection_progress():
     st.caption("5초마다 자동 갱신. 숫자가 오르면 수집이 진행 중입니다. "
                "①시가총액 조사 후 ②대형주부터 일봉을 백필합니다.")
 
+    # 실시간 활동 로그 피드
+    with open_store() as store:
+        logs = store.recent_collect_log(25)
+    st.markdown("**🧾 실시간 수집 로그 (최근 25건)**")
+    if logs:
+        kind_icon = {"backfill": "📈", "liquidity": "🔎", "error": "⚠️"}
+        feed = pd.DataFrame([
+            {"시각": r["ts"], "구분": kind_icon.get(r["kind"], r["kind"]),
+             "종목": f'{r["name"]}({r["symbol"]})', "내용": r["detail"]}
+            for r in logs
+        ])
+        st.dataframe(feed, width="stretch", hide_index=True, height=320)
+    else:
+        st.caption("아직 수집 로그가 없습니다. 수집이 시작되면 여기에 종목별 적재 내역이 흐릅니다.")
+
 
 # --- 사이드바 --------------------------------------------------------------
 cfg = get_config()
