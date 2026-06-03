@@ -48,6 +48,13 @@ CREATE TABLE IF NOT EXISTS symbol_name (
     symbol TEXT PRIMARY KEY,
     name   TEXT
 );
+-- 종목 마스터 (ETF 제외 개별주 유니버스)
+CREATE TABLE IF NOT EXISTS stock_master (
+    symbol TEXT PRIMARY KEY,
+    name   TEXT,
+    market TEXT,        -- KOSPI | KOSDAQ
+    group_code TEXT     -- ST(주권) 등
+);
 -- 급등주 스캔 스냅샷 (학습용 누적)
 CREATE TABLE IF NOT EXISTS surge_scan (
     ts       TEXT NOT NULL,
@@ -164,6 +171,31 @@ class DataStore:
         )
         self.conn.commit()
         return len(data)
+
+    # --- 종목 마스터 --------------------------------------------------------
+    def save_master(self, stocks: Iterable[dict[str, Any]]) -> int:
+        rows = [(s["symbol"], s["name"], s["market"], s.get("group", "ST")) for s in stocks]
+        self.conn.executemany(
+            "INSERT OR REPLACE INTO stock_master (symbol,name,market,group_code) "
+            "VALUES (?,?,?,?)", rows,
+        )
+        # 이름 조회 테이블에도 반영
+        self.conn.executemany(
+            "INSERT OR REPLACE INTO symbol_name (symbol,name) VALUES (?,?)",
+            [(s["symbol"], s["name"]) for s in stocks],
+        )
+        self.conn.commit()
+        return len(rows)
+
+    def master_symbols(self, market: str | None = None) -> list[dict[str, Any]]:
+        if market:
+            cur = self.conn.execute(
+                "SELECT symbol,name,market FROM stock_master WHERE market=? ORDER BY symbol",
+                (market,))
+        else:
+            cur = self.conn.execute(
+                "SELECT symbol,name,market FROM stock_master ORDER BY symbol")
+        return [dict(r) for r in cur.fetchall()]
 
     # --- 급등주 스캔/매매 ---------------------------------------------------
     def save_surge_scan(self, ts: str, rows: Iterable[dict[str, Any]]) -> int:

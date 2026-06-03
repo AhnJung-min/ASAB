@@ -33,19 +33,25 @@ ASAB/
 ## 데이터 수집 & 종목 선정 파이프라인
 
 ```powershell
-# 1) 데이터 수집: 거래대금 상위 종목의 과거 일봉/투자자동향/재무를 백필
-python -m src.collect --top 30 --months 12
-python -m src.collect --stats           # 저장 현황 확인
+# 0) 종목 유니버스 구축: KIS 종목 마스터에서 ETF/ETN 제외 개별주 전체(~2,700개)
+python -m src.universe
+
+# 1) 다국면 데이터 수집: 개별주 10년 일봉 백필 (강세장 단일국면 탈출)
+python -m src.collect --source master --months 120 --skip-existing
+python -m src.collect --source master --limit 300 --months 120   # 일부만
+python -m src.collect --stats                                    # 저장 현황
 
 # 2) 스크리너: 저장된 데이터로 매매 후보 종목 자동 선정
 python -m src.screener --top 10
-python -m src.screener --include-etf    # ETF/ETN 포함
 ```
 
+- **유니버스**: `src/universe.py` 가 KOSPI/KOSDAQ 마스터를 받아 증권그룹구분코드
+  `ST`(주권)만 추려 `stock_master` 테이블에 저장 (ETF/ETN/리츠 제외).
+- **다국면 데이터**: `--months 120` 이면 약 10년(2016~) 일봉을 백필하여
+  2018 조정·2020 코로나·2022 약세장을 포함 → 강세장 과적합 방지.
+- 종목당 ~30초 소요. `--skip-existing` 으로 중단 후 재개 가능.
 - 수집 데이터는 `data/market.db`(SQLite)에 누적 저장됩니다(중복 안전).
 - 스크리너 팩터: 모멘텀(40%) + 추세(20%) + 유동성(20%) + 저변동성(20%).
-- **참고**: 거래대금 순위 유니버스는 ETF/ETN이 많아, 재무비율이 있는 개별주만
-  기본 대상으로 합니다. 전체 종목 유니버스 확보는 향후 개선 항목입니다.
 
 ## 백테스트
 
