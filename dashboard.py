@@ -103,6 +103,38 @@ def latest_universe() -> pd.DataFrame:
         return pd.DataFrame([dict(r) for r in cur.fetchall()])
 
 
+# --- 수집 진행률 (실시간) --------------------------------------------------
+@st.fragment(run_every="5s")
+def collection_progress():
+    with open_store() as store:
+        universe_n = store.conn.execute(
+            "SELECT COUNT(*) c FROM stock_master").fetchone()["c"]
+        total_rows = store.conn.execute(
+            "SELECT COUNT(*) c FROM daily_price").fetchone()["c"]
+        collected = store.conn.execute(
+            "SELECT COUNT(*) FROM (SELECT symbol FROM daily_price "
+            "GROUP BY symbol HAVING COUNT(*)>=1000)").fetchone()[0]
+        liq_done = store.conn.execute(
+            "SELECT COUNT(*) c FROM stock_master WHERE liquidity IS NOT NULL").fetchone()["c"]
+
+    # 1) 시가총액 조사 진행률 (수집 우선순위 결정)
+    lpct = (liq_done / universe_n) if universe_n else 0.0
+    st.progress(min(lpct, 1.0),
+                text=f"① 시가총액 조사: {liq_done:,} / {universe_n:,} 종목 ({lpct*100:.1f}%)")
+    # 2) 10년 일봉 백필 진행률
+    cpct = (collected / universe_n) if universe_n else 0.0
+    st.progress(min(cpct, 1.0),
+                text=f"② 10년 일봉 백필: {collected:,} / {universe_n:,} 종목 ({cpct*100:.1f}%)")
+
+    a, b, c, d = st.columns(4)
+    a.metric("시총 조사", f"{liq_done:,}")
+    b.metric("백필 완료 종목", f"{collected:,}")
+    c.metric("일봉 총 행수", f"{total_rows:,}")
+    d.metric("갱신 시각", f"{pd.Timestamp.now():%H:%M:%S}")
+    st.caption("5초마다 자동 갱신. 숫자가 오르면 수집이 진행 중입니다. "
+               "①시가총액 조사 후 ②대형주부터 일봉을 백필합니다.")
+
+
 # --- 사이드바 --------------------------------------------------------------
 cfg = get_config()
 st.sidebar.title("⚙️ 설정")
@@ -247,6 +279,9 @@ with tab_acct:
 
 # --- 수집 데이터 탭 --------------------------------------------------------
 with tab_data:
+    st.subheader("⏳ 데이터 수집 진행 상황 (실시간)")
+    collection_progress()
+    st.divider()
     st.subheader("🗂 수집 데이터 현황")
     stats = store_stats()
     labels = {

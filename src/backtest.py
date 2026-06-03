@@ -56,13 +56,16 @@ def run_backtest(
     if not series:
         return {"error": "데이터가 없습니다. 먼저 python -m src.collect 를 실행하세요."}
 
-    fin_symbols = {
-        r["symbol"]
-        for r in store.conn.execute("SELECT DISTINCT symbol FROM financial_ratio")
-    }
+    # 개별주 유니버스(종목 마스터, ETF/ETN 제외). 없으면 재무보유종목으로 폴백.
+    master_set = {r["symbol"] for r in store.master_symbols()}
+    if not master_set:
+        master_set = {
+            r["symbol"]
+            for r in store.conn.execute("SELECT DISTINCT symbol FROM financial_ratio")
+        }
     pool = [
         s for s in series
-        if (not require_financials or s in fin_symbols) and len(series[s]) >= 61
+        if (not require_financials or s in master_set) and len(series[s]) >= 61
     ]
     if len(pool) < top_n:
         return {
@@ -83,15 +86,29 @@ def run_backtest(
         s: {r["date"]: i for i, r in enumerate(series[s])} for s in pool
     }
 
-    # --- 시장국면(레짐) 사전계산: 지수가 N일 이동평균 위면 risk-on(투자) ---
-    # 미래정보 누출 방지: t시점 판단은 t 이하의 지수 종가만 사용.
+    # --- 벤치마크(지수) 배열: 레짐 필터 + 상대강도에 공통 사용 ---
+    has_bench = BENCHMARK_SYMBOL in series
+    bdates = [r["date"] for r in series[BENCHMARK_SYMBOL]] if has_bench else []
+    bcloses = [r["close"] for r in series[BENCHMARK_SYMBOL]] if has_bench else []
+
+    def _bench_pos(t: str) -> int:
+        return bisect.bisect_right(bdates, t) - 1  # t 이하 마지막 지수 거래일
+
+    def index_mom_asof(t: str) -> float | None:
+        """t시점 지수 모멘텀(직전5일 제외 60일). 미래정보 누출 없음."""
+        if not has_bench:
+            return None
+        pos = _bench_pos(t)
+        if pos < 60:
+            return None
+        return bcloses[pos - 5] / bcloses[pos - 60] - 1
+
+    # 시장국면(레짐): 지수가 N일선 위면 risk-on(투자). t 이하 종가만 사용.
     regime_on: dict[str, bool] = {}
-    has_regime = regime_filter and BENCHMARK_SYMBOL in series and len(series[BENCHMARK_SYMBOL]) >= regime_ma
+    has_regime = regime_filter and has_bench and len(bcloses) >= regime_ma
     if has_regime:
-        bdates = [r["date"] for r in series[BENCHMARK_SYMBOL]]
-        bcloses = [r["close"] for r in series[BENCHMARK_SYMBOL]]
         for t in dates:
-            pos = bisect.bisect_right(bdates, t) - 1  # t 이하 마지막 지수 거래일
+            pos = _bench_pos(t)
             if pos >= regime_ma - 1:
                 sma = sum(bcloses[pos - regime_ma + 1: pos + 1]) / regime_ma
                 regime_on[t] = bcloses[pos] > sma
@@ -117,6 +134,7 @@ def run_backtest(
         t = dates[i]
 
         # --- t시점 후보 점수 계산 (t까지만 사용) ---
+        idx_mom_t = index_mom_asof(t)  # 상대강도 기준(지수 모멘텀)
         candidates = []
         for s in pool:
             if t not in idx_by[s]:
@@ -129,6 +147,7 @@ def run_backtest(
             if f is None:
                 continue
             f["symbol"] = s
+            f["rel_strength"] = (f["momentum"] - idx_mom_t) if idx_mom_t is not None else f["momentum"]
             candidates.append(f)
 
         ranked = assign_scores(candidates)

@@ -51,6 +51,19 @@ class MarketData:
         rows.sort(key=lambda x: x["date"])  # 과거 -> 최근
         return rows
 
+    # --- 시가총액 (유동성/품질 프록시) -------------------------------------
+    def market_cap(self, symbol: str) -> int:
+        """시가총액(억원). 종목 우선순위·품질 기준으로 사용."""
+        data = self.c.get(
+            "/uapi/domestic-stock/v1/quotations/inquire-price",
+            tr_id="FHKST01010100",
+            params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": symbol},
+        )
+        try:
+            return int(data["output"].get("hts_avls", 0) or 0)
+        except (ValueError, TypeError):
+            return 0
+
     # --- 거래량/거래대금 순위 (종목 유니버스/스크리닝) ----------------------
     def volume_rank(self, by_value: bool = True, top: int = 30) -> list[dict[str, Any]]:
         """거래 상위 종목. by_value=True 면 거래대금 기준, False 면 거래량 기준.

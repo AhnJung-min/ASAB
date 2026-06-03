@@ -58,7 +58,8 @@ def _build_universe(md: MarketData, store: DataStore, source: str, top: int,
     source='master': 종목 마스터(ETF 제외 개별주 전체). source='volume': 거래대금 상위.
     """
     if source == "master":
-        rows = store.master_symbols()
+        # 시가총액(대형주) 우선순위로 수집 → 중요한 종목부터 채움
+        rows = store.master_symbols(by_liquidity=True)
         if not rows:
             log("종목 마스터가 비어 있습니다. 먼저 `python -m src.universe` 실행 필요.")
             return []
