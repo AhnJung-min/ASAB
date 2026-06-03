@@ -110,9 +110,9 @@ def run(source: str, top: int, months: int, limit: int | None,
                                   f"일봉 {n_daily}건{extra} ({i}/{len(universe)})")
             if i % 25 == 0 or n_daily == 0:
                 log(f"  [{i}/{len(universe)}] {name}({sym}): 일봉 {n_daily}건{extra}")
-        except KISApiError as e:
+        except Exception as e:  # 단일 종목 오류로 전체 백필이 죽지 않도록  # noqa: BLE001
             store.add_collect_log(datetime.now().strftime("%H:%M:%S"), "error", sym, name, str(e))
-            log(f"  [{i}/{len(universe)}] {name}({sym}): API 오류 {e}")
+            log(f"  [{i}/{len(universe)}] {name}({sym}): 오류 {e}")
 
     log(f"수집 완료 (이번에 {done}종목 처리). 저장 현황:")
     for k, v in store.stats().items():

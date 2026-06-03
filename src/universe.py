@@ -109,7 +109,7 @@ def rank_liquidity(store: DataStore, log_every: int = 100, rescan: bool = False)
             continue  # 이미 조사됨 → 건너뜀(재개)
         try:
             cap = md.market_cap(r["symbol"])
-        except KISApiError:
+        except Exception:  # 단일 종목 오류로 전체 조사가 죽지 않도록  # noqa: BLE001
             cap = 0
         batch.append((float(cap), r["symbol"]))
         store.add_collect_log(datetime.now().strftime("%H:%M:%S"), "liquidity",
