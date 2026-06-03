@@ -107,6 +107,8 @@ def rank_liquidity(store: DataStore, log_every: int = 100) -> None:
         except KISApiError:
             cap = 0
         batch.append((float(cap), r["symbol"]))
+        store.add_collect_log(datetime.now().strftime("%H:%M:%S"), "liquidity",
+                              r["symbol"], r["name"], f"시총 {cap/10000:,.1f}조 ({i}/{total})")
         if len(batch) >= 50:
             store.set_master_liquidity(batch)
             batch = []

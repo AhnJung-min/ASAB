@@ -80,6 +80,12 @@ CREATE TABLE IF NOT EXISTS account_snapshot (
     realized_krw REAL, unrealized_krw REAL, fx_rate REAL
 );
 CREATE INDEX IF NOT EXISTS idx_acct_ts ON account_snapshot(ts);
+-- 수집 활동 로그 (대시보드 실시간 피드)
+CREATE TABLE IF NOT EXISTS collect_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT, kind TEXT, symbol TEXT, name TEXT, detail TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_collect_log_id ON collect_log(id);
 """
 
 
@@ -218,6 +224,19 @@ class DataStore:
             "UPDATE stock_master SET liquidity=? WHERE symbol=?", values)
         self.conn.commit()
         return len(values)
+
+    # --- 수집 활동 로그 -----------------------------------------------------
+    def add_collect_log(self, ts: str, kind: str, symbol: str,
+                        name: str, detail: str) -> None:
+        self.conn.execute(
+            "INSERT INTO collect_log (ts,kind,symbol,name,detail) VALUES (?,?,?,?,?)",
+            (ts, kind, symbol, name, detail))
+        self.conn.commit()
+
+    def recent_collect_log(self, limit: int = 30) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT ts,kind,symbol,name,detail FROM collect_log "
+            "ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
 
     # --- 급등주 스캔/매매 ---------------------------------------------------
     def save_surge_scan(self, ts: str, rows: Iterable[dict[str, Any]]) -> int:
