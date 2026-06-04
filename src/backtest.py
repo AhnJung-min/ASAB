@@ -51,13 +51,21 @@ def run_backtest(
     require_financials: bool = True,
     regime_filter: bool = False,
     regime_ma: int = 200,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    max_pool: int | None = None,
+    series: dict[str, list[dict]] | None = None,
 ) -> dict[str, Any]:
-    series = _load_series(store)
+    # series 를 외부에서 주입하면 재로딩 생략(워크포워드에서 반복 호출 시 성능)
+    if series is None:
+        series = _load_series(store)
     if not series:
         return {"error": "데이터가 없습니다. 먼저 python -m src.collect 를 실행하세요."}
 
     # 개별주 유니버스(종목 마스터, ETF/ETN 제외). 없으면 재무보유종목으로 폴백.
-    master_set = {r["symbol"] for r in store.master_symbols()}
+    master_rows = store.master_symbols()
+    master_set = {r["symbol"] for r in master_rows}
+    liq_of = {r["symbol"]: (r.get("liquidity") or 0) for r in master_rows}
     if not master_set:
         master_set = {
             r["symbol"]
@@ -67,6 +75,10 @@ def run_backtest(
         s for s in series
         if (not require_financials or s in master_set) and len(series[s]) >= 61
     ]
+    # 유동성(시총) 상위로 제한 → 의미있는 유니버스 + 속도
+    if max_pool and len(pool) > max_pool:
+        pool.sort(key=lambda s: liq_of.get(s, 0), reverse=True)
+        pool = pool[:max_pool]
     if len(pool) < top_n:
         return {
             "error": f"백테스트 대상 종목이 부족합니다(개별주 {len(pool)}개 < top_n {top_n}). "
@@ -126,12 +138,17 @@ def run_backtest(
     curve: list[dict] = []
     holdings_log: list[dict] = []
 
-    start_i = 60  # 워밍업
+    # 워밍업(60) 또는 start_date 중 늦은 쪽에서 매매 시작
+    start_i = 60
+    if start_date:
+        start_i = max(start_i, bisect.bisect_left(dates, start_date))
     prev_holdings: list[str] = []
 
     i = start_i
     while i < len(dates):
         t = dates[i]
+        if end_date and t > end_date:
+            break
 
         # --- t시점 후보 점수 계산 (t까지만 사용) ---
         idx_mom_t = index_mom_asof(t)  # 상대강도 기준(지수 모멘텀)

@@ -19,3 +19,6 @@ data/*.db-shm
 
 # Claude 로컬 설정 (개인 환경, 추적 제외)
 .claude/settings.local.json
+
+# 로컬 백업본
+backups/
