@@ -103,56 +103,81 @@ def latest_universe() -> pd.DataFrame:
         return pd.DataFrame([dict(r) for r in cur.fetchall()])
 
 
-# --- 수집 진행률 (실시간) --------------------------------------------------
+# --- 수집 현황 모니터 (실시간) ---------------------------------------------
+def _eta(logs) -> str:
+    """최근 backfill 로그 타임스탬프로 수집 속도 추정 → 남은 시간."""
+    ts = [r["ts"] for r in logs if r["kind"] == "backfill"][:20]
+    if len(ts) < 2:
+        return "—"
+    def sec(t):
+        h, m, s = map(int, t.split(":"))
+        return h * 3600 + m * 60 + s
+    span = sec(ts[0]) - sec(ts[-1])  # 최신 - 과거
+    if span <= 0:
+        return "—"
+    rate = (len(ts) - 1) / span  # 종목/초
+    return rate, span
+
+
 @st.fragment(run_every="5s")
 def collection_progress():
     with open_store() as store:
-        universe_n = store.conn.execute(
-            "SELECT COUNT(*) c FROM stock_master").fetchone()["c"]
-        total_rows = store.conn.execute(
-            "SELECT COUNT(*) c FROM daily_price").fetchone()["c"]
-        # 데이터가 '있는' 개별주 (새 종목 받을 때마다 증가 → 진짜 진행 지표)
-        collected = store.conn.execute(
+        c = store.conn
+        universe_n = c.execute("SELECT COUNT(*) FROM stock_master").fetchone()[0]
+        total_rows = c.execute("SELECT COUNT(*) FROM daily_price").fetchone()[0]
+        collected = c.execute(
             "SELECT COUNT(*) FROM (SELECT DISTINCT d.symbol FROM daily_price d "
             "JOIN stock_master m ON d.symbol=m.symbol)").fetchone()[0]
-        # 10년 풀 히스토리(참고용)
-        full_hist = store.conn.execute(
-            "SELECT COUNT(*) FROM (SELECT symbol FROM daily_price "
-            "GROUP BY symbol HAVING COUNT(*)>=1000)").fetchone()[0]
-        liq_done = store.conn.execute(
-            "SELECT COUNT(*) c FROM stock_master WHERE liquidity IS NOT NULL").fetchone()["c"]
+        full_hist = c.execute("SELECT COUNT(*) FROM (SELECT symbol FROM daily_price "
+                              "GROUP BY symbol HAVING COUNT(*)>=1000)").fetchone()[0]
+        liq_done = c.execute("SELECT COUNT(*) FROM stock_master WHERE liquidity IS NOT NULL").fetchone()[0]
+        errs = c.execute("SELECT COUNT(*) FROM collect_log WHERE kind='error'").fetchone()[0]
+        # 시장별 진행
+        mk = {row[0]: row[1] for row in c.execute(
+            "SELECT market, COUNT(*) FROM stock_master GROUP BY market")}
+        mk_done = {row[0]: row[1] for row in c.execute(
+            "SELECT m.market, COUNT(DISTINCT d.symbol) FROM daily_price d "
+            "JOIN stock_master m ON d.symbol=m.symbol GROUP BY m.market")}
+        logs = store.recent_collect_log(200)
 
-    # 1) 시가총액 조사 진행률 (수집 우선순위 결정)
-    lpct = (liq_done / universe_n) if universe_n else 0.0
-    st.progress(min(lpct, 1.0),
-                text=f"① 시가총액 조사: {liq_done:,} / {universe_n:,} 종목 ({lpct*100:.1f}%)")
-    # 2) 일봉 백필 진행률 (데이터 있는 종목 기준 → 새 종목마다 증가)
     cpct = (collected / universe_n) if universe_n else 0.0
+    # ETA
+    eta_txt = "거의 완료" if collected >= universe_n else "측정 중…"
+    r = _eta(logs)
+    if isinstance(r, tuple) and r[0] > 0 and collected < universe_n:
+        remain = universe_n - collected
+        secs = remain / r[0]
+        h, m = int(secs // 3600), int((secs % 3600) // 60)
+        eta_txt = f"약 {h}시간 {m}분" if h else f"약 {m}분"
+
+    st.subheader("📡 데이터 수집 현황")
     st.progress(min(cpct, 1.0),
-                text=f"② 일봉 백필: {collected:,} / {universe_n:,} 종목 ({cpct*100:.1f}%)")
-
-    a, b, c, d = st.columns(4)
-    a.metric("수집된 종목", f"{collected:,}", f"10년완비 {full_hist:,}")
+                text=f"일봉 백필: {collected:,} / {universe_n:,} 종목  ({cpct*100:.1f}%)")
+    a, b, c1, d = st.columns(4)
+    a.metric("수집된 종목", f"{collected:,} / {universe_n:,}", f"10년완비 {full_hist:,}")
     b.metric("일봉 총 행수", f"{total_rows:,}")
-    c.metric("시총 조사", f"{liq_done:,}")
-    d.metric("갱신 시각", f"{pd.Timestamp.now():%H:%M:%S}")
-    st.caption("5초마다 자동 갱신. '수집된 종목'·'일봉 총 행수'가 오르면 진행 중입니다. "
-               "(최근 상장주는 히스토리가 짧아 '10년완비'엔 늦게 잡힙니다.)")
+    c1.metric("예상 완료", eta_txt)
+    d.metric("오류", f"{errs:,}건", delta_color="off")
 
-    # 실시간 활동 로그 피드
-    with open_store() as store:
-        logs = store.recent_collect_log(25)
+    # 시장별
+    cols = st.columns(2)
+    for col, mkt in zip(cols, ("KOSPI", "KOSDAQ")):
+        tot, dn = mk.get(mkt, 0), mk_done.get(mkt, 0)
+        col.progress(min(dn / tot, 1.0) if tot else 0.0,
+                     text=f"{mkt}: {dn:,} / {tot:,}")
+    st.caption(f"5초마다 자동 갱신 · 시총조사 {liq_done:,}/{universe_n:,} · 갱신 {pd.Timestamp.now():%H:%M:%S}")
+
     st.markdown("**🧾 실시간 수집 로그 (최근 25건)**")
     if logs:
-        kind_icon = {"backfill": "📈", "liquidity": "🔎", "error": "⚠️"}
+        icon = {"backfill": "📈", "liquidity": "🔎", "error": "⚠️"}
         feed = pd.DataFrame([
-            {"시각": r["ts"], "구분": kind_icon.get(r["kind"], r["kind"]),
+            {"시각": r["ts"], "구분": icon.get(r["kind"], r["kind"]),
              "종목": f'{r["name"]}({r["symbol"]})', "내용": r["detail"]}
-            for r in logs
+            for r in logs[:25]
         ])
-        st.dataframe(feed, width="stretch", hide_index=True, height=320)
+        st.dataframe(feed, width="stretch", hide_index=True, height=300)
     else:
-        st.caption("아직 수집 로그가 없습니다. 수집이 시작되면 여기에 종목별 적재 내역이 흐릅니다.")
+        st.caption("아직 로그가 없습니다.")
 
 
 # --- 사이드바 --------------------------------------------------------------
@@ -178,9 +203,13 @@ if st.sidebar.button("🔄 지금 새로고침"):
 
 st.title("📈 국내주식 자동매매 대시보드")
 
-tab_bt, tab_screen, tab_acct, tab_data = st.tabs(
-    ["📊 백테스트", "🔍 스크리너", "💰 계좌", "🗂 수집 데이터"]
+tab_collect, tab_bt, tab_screen, tab_acct, tab_data = st.tabs(
+    ["📡 수집 현황", "📊 백테스트", "🔍 스크리너", "💰 계좌", "🗂 데이터"]
 )
+
+# --- 수집 현황 탭 (메인) ---------------------------------------------------
+with tab_collect:
+    collection_progress()
 
 # --- 백테스트 탭 -----------------------------------------------------------
 with tab_bt:
@@ -299,10 +328,7 @@ with tab_acct:
 
 # --- 수집 데이터 탭 --------------------------------------------------------
 with tab_data:
-    st.subheader("⏳ 데이터 수집 진행 상황 (실시간)")
-    collection_progress()
-    st.divider()
-    st.subheader("🗂 수집 데이터 현황")
+    st.subheader("🗂 수집 데이터 상세")
     stats = store_stats()
     labels = {
         "daily_price": "일봉(행)", "investor_flow": "투자자동향",
