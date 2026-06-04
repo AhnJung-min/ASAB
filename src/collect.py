@@ -87,13 +87,18 @@ def run(source: str, top: int, months: int, limit: int | None,
         return
     log(f"  대상 {len(universe)}종목 · 일봉 {months}개월 백필 시작")
 
-    # 스킵 기준: 이미 충분한 일봉이 있으면 건너뜀(재개용)
-    min_rows = int(months * 18)  # 월 ~18영업일
+    # 스킵 기준: '최신 일자까지 이미 받았으면' 건너뜀(재개용).
+    # (행수 기준은 최근상장주처럼 히스토리가 짧은 종목을 영원히 재수집하는 버그가 있었음)
+    gmax = store.conn.execute("SELECT MAX(date) FROM daily_price").fetchone()[0]
+    cutoff = ((datetime.strptime(gmax, "%Y%m%d") - timedelta(days=7)).strftime("%Y%m%d")
+              if gmax else "00000000")
     done = 0
     for i, item in enumerate(universe, 1):
         sym, name = item["symbol"], item["name"]
-        if skip_existing and len(store.get_daily(sym)) >= min_rows:
-            continue
+        if skip_existing:
+            ld = store.latest_date(sym)
+            if ld and ld >= cutoff:  # 이미 최근까지 받음 → 건너뜀
+                continue
         try:
             n_daily = backfill_daily(md, store, sym, months)
             extra = ""
