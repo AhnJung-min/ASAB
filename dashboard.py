@@ -111,7 +111,12 @@ def collection_progress():
             "SELECT COUNT(*) c FROM stock_master").fetchone()["c"]
         total_rows = store.conn.execute(
             "SELECT COUNT(*) c FROM daily_price").fetchone()["c"]
+        # 데이터가 '있는' 개별주 (새 종목 받을 때마다 증가 → 진짜 진행 지표)
         collected = store.conn.execute(
+            "SELECT COUNT(*) FROM (SELECT DISTINCT d.symbol FROM daily_price d "
+            "JOIN stock_master m ON d.symbol=m.symbol)").fetchone()[0]
+        # 10년 풀 히스토리(참고용)
+        full_hist = store.conn.execute(
             "SELECT COUNT(*) FROM (SELECT symbol FROM daily_price "
             "GROUP BY symbol HAVING COUNT(*)>=1000)").fetchone()[0]
         liq_done = store.conn.execute(
@@ -121,18 +126,18 @@ def collection_progress():
     lpct = (liq_done / universe_n) if universe_n else 0.0
     st.progress(min(lpct, 1.0),
                 text=f"① 시가총액 조사: {liq_done:,} / {universe_n:,} 종목 ({lpct*100:.1f}%)")
-    # 2) 10년 일봉 백필 진행률
+    # 2) 일봉 백필 진행률 (데이터 있는 종목 기준 → 새 종목마다 증가)
     cpct = (collected / universe_n) if universe_n else 0.0
     st.progress(min(cpct, 1.0),
-                text=f"② 10년 일봉 백필: {collected:,} / {universe_n:,} 종목 ({cpct*100:.1f}%)")
+                text=f"② 일봉 백필: {collected:,} / {universe_n:,} 종목 ({cpct*100:.1f}%)")
 
     a, b, c, d = st.columns(4)
-    a.metric("시총 조사", f"{liq_done:,}")
-    b.metric("백필 완료 종목", f"{collected:,}")
-    c.metric("일봉 총 행수", f"{total_rows:,}")
+    a.metric("수집된 종목", f"{collected:,}", f"10년완비 {full_hist:,}")
+    b.metric("일봉 총 행수", f"{total_rows:,}")
+    c.metric("시총 조사", f"{liq_done:,}")
     d.metric("갱신 시각", f"{pd.Timestamp.now():%H:%M:%S}")
-    st.caption("5초마다 자동 갱신. 숫자가 오르면 수집이 진행 중입니다. "
-               "①시가총액 조사 후 ②대형주부터 일봉을 백필합니다.")
+    st.caption("5초마다 자동 갱신. '수집된 종목'·'일봉 총 행수'가 오르면 진행 중입니다. "
+               "(최근 상장주는 히스토리가 짧아 '10년완비'엔 늦게 잡힙니다.)")
 
     # 실시간 활동 로그 피드
     with open_store() as store:
