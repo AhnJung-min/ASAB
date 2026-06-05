@@ -96,10 +96,27 @@ def run_ml_wf(dataset, train_periods=TRAIN_PERIODS, test_periods=TEST_PERIODS,
             test_span.append(d)
         k += test_periods
 
+    def _cum(rets):
+        eq, v = [], 1.0
+        for r in rets:
+            v *= (1 + r); eq.append(v)
+        return eq
+
+    # 피처 중요도(전체 데이터 학습)
+    Xall = np.array([[r[f] for f in FEATURES] for r in dataset], dtype=float)
+    yall = np.array([r["fwd_ret"] for r in dataset], dtype=float)
+    fm = lgb.LGBMRegressor(n_estimators=200, learning_rate=0.03, num_leaves=15,
+                           min_child_samples=50, verbose=-1).fit(Xall, yall)
+    importance = sorted(zip(FEATURES, [int(v) for v in fm.feature_importances_]),
+                        key=lambda t: -t[1])
+
     return {
         "ml": _metrics(ml_rets), "mom": _metrics(mom_rets), "mkt": _metrics(mkt_rets),
         "n_test": len(ml_rets), "span": (test_span[0], test_span[-1]) if test_span else None,
         "dataset_rows": len(dataset),
+        "curves": {"dates": test_span, "ml": _cum(ml_rets),
+                   "mom": _cum(mom_rets), "mkt": _cum(mkt_rets)},
+        "importance": importance,
     }
 
 
@@ -126,16 +143,8 @@ def main() -> None:
         m = res[key]
         print(f"{label:12}{m['total']*100:>8.1f}%{m['cagr']*100:>8.1f}%{m['sharpe']:>7.2f}{m['mdd']*100:>7.1f}%")
     print("\n→ ML이 모멘텀·시장보다 샤프/수익이 높아야 '알파'가 있는 것입니다.")
-
-    # 전체 데이터로 학습한 모델의 피처 중요도 (참고)
-    import lightgbm as lgb
-    X = np.array([[r[f] for f in FEATURES] for r in ds], dtype=float)
-    y = np.array([r["fwd_ret"] for r in ds], dtype=float)
-    mdl = lgb.LGBMRegressor(n_estimators=200, learning_rate=0.03, num_leaves=15,
-                            min_child_samples=50, verbose=-1).fit(X, y)
-    imp = sorted(zip(FEATURES, mdl.feature_importances_), key=lambda x: -x[1])
     print("\n피처 중요도(상위):")
-    for name, val in imp[:8]:
+    for name, val in res["importance"][:8]:
         print(f"   {name:<16}{val}")
 
 
