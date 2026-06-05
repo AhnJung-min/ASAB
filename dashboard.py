@@ -15,8 +15,10 @@ import streamlit as st
 
 from src.data.store import DataStore
 from src.kis.config import load_config
+from src.features import build_dataset
+from src.ml import run_ml_wf
 
-st.set_page_config(page_title="ASAB 수집 대시보드", page_icon="📡", layout="wide")
+st.set_page_config(page_title="ASAB 대시보드", page_icon="📡", layout="wide")
 
 
 @st.cache_resource
@@ -49,6 +51,13 @@ def symbol_daily(symbol: str) -> pd.DataFrame:
         df["date"] = pd.to_datetime(df["date"], format="%Y%m%d")
         df = df.set_index("date")
     return df
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def ml_run(top_n: int, max_pool: int, hold_days: int = 20) -> dict:
+    with open_store() as store:
+        ds = build_dataset(store, hold_days=hold_days, max_pool=max_pool)
+    return run_ml_wf(ds, top_n=top_n)
 
 
 @st.cache_data(ttl=120)
@@ -144,11 +153,51 @@ if st.sidebar.button("🔄 캐시 비우기 / 새로고침"):
     st.rerun()
 st.sidebar.caption("백테스트·스크리너는 CLI에서:\n`python -m src.walkforward`")
 
-st.title("📡 ASAB 데이터 수집 대시보드")
-tab_collect, tab_data = st.tabs(["📡 수집 현황", "🗂 데이터"])
+st.title("📡 ASAB 대시보드")
+tab_collect, tab_model, tab_data = st.tabs(["📡 수집 현황", "🤖 모델", "🗂 데이터"])
 
 with tab_collect:
     collection_progress()
+
+# --- ML 모델 탭 ------------------------------------------------------------
+with tab_model:
+    st.subheader("🤖 ML 예측 모델 (LightGBM 워크포워드)")
+    cc1, cc2 = st.columns(2)
+    m_topn = cc1.slider("상위 N 종목", 5, 30, 10)
+    m_pool = cc2.slider("유니버스(유동성 상위)", 100, 500, 300, step=50)
+    if st.button("▶ 학습·검증 실행 (1~2분 소요)"):
+        st.session_state["ml_go"] = (m_topn, m_pool)
+
+    go = st.session_state.get("ml_go")
+    if not go:
+        st.caption("버튼을 눌러 학습·검증을 실행하세요. (DB만 읽어 수집과 충돌 없음. "
+                   "결과는 캐시되어 재조회는 즉시)")
+    else:
+        with st.spinner("데이터셋 생성 + LightGBM 워크포워드 검증 중... (1~2분)"):
+            res = ml_run(go[0], go[1])
+        if "error" in res:
+            st.warning(res["error"])
+        else:
+            st.caption(f"OOS {res['n_test']}기간 · {res['span'][0]}~{res['span'][1]} · "
+                       f"학습데이터 {res['dataset_rows']:,}행 · top{go[0]} / 유니버스{go[1]}")
+            cols = st.columns(3)
+            for col, (k, label) in zip(cols, [("ml", "ML(LGBM)"), ("mom", "모멘텀"), ("mkt", "시장(평균)")]):
+                m = res[k]
+                col.metric(f"{label} 샤프", f"{m['sharpe']:.2f}",
+                           f"누적 {m['total']*100:.0f}% · MDD {m['mdd']*100:.0f}%")
+            cv = res["curves"]
+            curve_df = pd.DataFrame(
+                {"ML": cv["ml"], "모멘텀": cv["mom"], "시장": cv["mkt"]},
+                index=pd.to_datetime(cv["dates"], format="%Y%m%d"))
+            st.subheader("OOS 누적수익 곡선 (1.0 = 시작)")
+            st.line_chart(curve_df)
+            st.subheader("피처 중요도")
+            imp_df = pd.DataFrame(res["importance"], columns=["피처", "중요도"]).set_index("피처")
+            st.bar_chart(imp_df)
+            ml_sh, mom_sh = res["ml"]["sharpe"], res["mom"]["sharpe"]
+            verdict = ("✅ ML이 모멘텀보다 위험효율(샤프) 우위" if ml_sh > mom_sh
+                       else "⚠️ 이번 설정에선 ML이 모멘텀을 못 이김")
+            st.info(f"{verdict}. (절대수익은 강세장 영향 → 상대비교가 핵심)")
 
 with tab_data:
     st.subheader("🗂 수집 데이터 상세")
