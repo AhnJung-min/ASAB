@@ -86,6 +86,45 @@ CREATE TABLE IF NOT EXISTS collect_log (
     ts TEXT, kind TEXT, symbol TEXT, name TEXT, detail TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_collect_log_id ON collect_log(id);
+-- === 1군 분석 데이터 (실전 도메인 전용, 모델 피처용) =====================
+-- 공매도 일별추이
+CREATE TABLE IF NOT EXISTS short_sale (
+    symbol TEXT NOT NULL,
+    date   TEXT NOT NULL,
+    short_qty         INTEGER,  -- 공매도 체결 수량
+    short_vol_ratio   REAL,     -- 공매도 거래량 비중(%)
+    short_value       INTEGER,  -- 공매도 거래 대금
+    short_value_ratio REAL,     -- 공매도 거래대금 비중(%)
+    PRIMARY KEY (symbol, date)
+);
+-- 신용잔고 일별추이
+CREATE TABLE IF NOT EXISTS credit_balance (
+    symbol TEXT NOT NULL,
+    date   TEXT NOT NULL,
+    loan_rmnd_qty   INTEGER,  -- 융자 잔고 주수
+    loan_rmnd_rate  REAL,     -- 융자 잔고 비율
+    loan_gvrt       REAL,     -- 융자 공여율
+    stln_rmnd_qty   INTEGER,  -- 대주 잔고 주수
+    PRIMARY KEY (symbol, date)
+);
+-- 종목별 프로그램매매추이(일별)
+CREATE TABLE IF NOT EXISTS program_trade (
+    symbol TEXT NOT NULL,
+    date   TEXT NOT NULL,
+    prog_net_qty   INTEGER,  -- 프로그램 순매수 수량
+    prog_net_value INTEGER,  -- 프로그램 순매수 대금
+    PRIMARY KEY (symbol, date)
+);
+-- 종목별 일별 대차거래추이
+CREATE TABLE IF NOT EXISTS loan_trans (
+    symbol TEXT NOT NULL,
+    date   TEXT NOT NULL,
+    loan_new_qty    INTEGER,  -- 당일 증가 주수(체결)
+    loan_redeem_qty INTEGER,  -- 당일 감소 주수(상환)
+    loan_rmnd_qty   INTEGER,  -- 당일 잔고 주수
+    loan_rmnd_amt   INTEGER,  -- 당일 잔고 금액
+    PRIMARY KEY (symbol, date)
+);
 """
 
 
@@ -169,6 +208,57 @@ class DataStore:
              r["net_income_growth"], r["sales_growth"]),
         )
         self.conn.commit()
+
+    # --- 1군 분석 데이터 저장 -----------------------------------------------
+    def save_short_sale(self, symbol: str, rows: Iterable[dict[str, Any]]) -> int:
+        data = [
+            (symbol, r["date"], r["short_qty"], r["short_vol_ratio"],
+             r["short_value"], r["short_value_ratio"])
+            for r in rows
+        ]
+        self.conn.executemany(
+            "INSERT OR REPLACE INTO short_sale "
+            "(symbol,date,short_qty,short_vol_ratio,short_value,short_value_ratio) "
+            "VALUES (?,?,?,?,?,?)", data)
+        self.conn.commit()
+        return len(data)
+
+    def save_credit_balance(self, symbol: str, rows: Iterable[dict[str, Any]]) -> int:
+        data = [
+            (symbol, r["date"], r["loan_rmnd_qty"], r["loan_rmnd_rate"],
+             r["loan_gvrt"], r["stln_rmnd_qty"])
+            for r in rows
+        ]
+        self.conn.executemany(
+            "INSERT OR REPLACE INTO credit_balance "
+            "(symbol,date,loan_rmnd_qty,loan_rmnd_rate,loan_gvrt,stln_rmnd_qty) "
+            "VALUES (?,?,?,?,?,?)", data)
+        self.conn.commit()
+        return len(data)
+
+    def save_program_trade(self, symbol: str, rows: Iterable[dict[str, Any]]) -> int:
+        data = [
+            (symbol, r["date"], r["prog_net_qty"], r["prog_net_value"])
+            for r in rows
+        ]
+        self.conn.executemany(
+            "INSERT OR REPLACE INTO program_trade "
+            "(symbol,date,prog_net_qty,prog_net_value) VALUES (?,?,?,?)", data)
+        self.conn.commit()
+        return len(data)
+
+    def save_loan_trans(self, symbol: str, rows: Iterable[dict[str, Any]]) -> int:
+        data = [
+            (symbol, r["date"], r["loan_new_qty"], r["loan_redeem_qty"],
+             r["loan_rmnd_qty"], r["loan_rmnd_amt"])
+            for r in rows
+        ]
+        self.conn.executemany(
+            "INSERT OR REPLACE INTO loan_trans "
+            "(symbol,date,loan_new_qty,loan_redeem_qty,loan_rmnd_qty,loan_rmnd_amt) "
+            "VALUES (?,?,?,?,?,?)", data)
+        self.conn.commit()
+        return len(data)
 
     def save_universe(self, date: str, rows: Iterable[dict[str, Any]]) -> int:
         rows = list(rows)
@@ -322,7 +412,8 @@ class DataStore:
 
     def stats(self) -> dict[str, int]:
         out = {}
-        for tbl in ("daily_price", "investor_flow", "financial_ratio", "universe_snapshot"):
+        for tbl in ("daily_price", "investor_flow", "financial_ratio", "universe_snapshot",
+                    "short_sale", "credit_balance", "program_trade", "loan_trans"):
             out[tbl] = self.conn.execute(f"SELECT COUNT(*) AS c FROM {tbl}").fetchone()["c"]
         out["symbols"] = len(self.symbols())
         return out
