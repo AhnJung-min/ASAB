@@ -1,7 +1,7 @@
 """KIS REST 공통 클라이언트. 헤더 구성, hashkey 발급, 요청 래핑.
 
 모의투자 서버는 초당 호출 제한이 엄격하므로(EGW00201) 요청 간 최소 간격을
-두고, 한도 초과 응답이 오면 잠시 대기 후 재시도한다.
+두고, 한도 초과 응답이나 네트워크 끊김 시 잠시 대기 후 재시도한다.
 """
 from __future__ import annotations
 
@@ -85,7 +85,7 @@ class KISClient:
         )
 
     def _request_with_retry(self, do_request) -> dict[str, Any]:
-        last_err: KISApiError | None = None
+        last_err: Exception | None = None
         for attempt in range(_MAX_RETRY):
             self._throttle()
             try:
@@ -94,7 +94,11 @@ class KISClient:
                 if e.code != _RATE_LIMIT_CODE:
                     raise
                 last_err = e
-                # 지수 백오프: 0.5s, 1s, 2s, ...
+                time.sleep(0.5 * (2 ** attempt))  # 지수 백오프
+            except requests.exceptions.RequestException as e:
+                # 네트워크 끊김(RemoteDisconnected)·타임아웃 등도 재시도.
+                # (안 하면 백필 중 끊겨 과거 데이터가 잘린 채 남는 버그)
+                last_err = e
                 time.sleep(0.5 * (2 ** attempt))
         assert last_err is not None
         raise last_err
