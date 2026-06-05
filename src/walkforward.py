@@ -36,6 +36,7 @@ TEST_DAYS = 126    # 검증 ~6개월
 MAX_POOL = 200     # 유동성 상위 200종목
 HOLD = 20
 COST = 25.0
+SLIPPAGE = 10.0    # 슬리피지(bps, 유동성 차등) — 백테스트와 동일 가정
 EMBARGO = HOLD     # train↔test 사이 비우는 거래일(=보유기간 → 누수 0)
 
 
@@ -85,8 +86,8 @@ def run_wf(store: DataStore, train_days=TRAIN_DAYS, test_days=TEST_DAYS,
                 "데이터가 더 쌓이면 다시 시도하세요."}
 
     def bt(cfg, s, e):
-        return run_backtest(store, hold_days=HOLD, cost_bps=COST, max_pool=max_pool,
-                            start_date=s, end_date=e, series=series, **cfg)
+        return run_backtest(store, hold_days=HOLD, cost_bps=COST, slippage_bps=SLIPPAGE,
+                            max_pool=max_pool, start_date=s, end_date=e, series=series, **cfg)
 
     fold_rows = []
     eq, beq = [1.0], [1.0]
