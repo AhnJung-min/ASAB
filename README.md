@@ -1,7 +1,7 @@
 # KIS 자동매매 봇 (모의투자)
 
 한국투자증권(KIS) Open API 를 이용한 **국내주식 자동매매** 프로그램입니다.
-(미국장 관련 코드는 `archive/` 에 보존되어 있으며 현재 비활성입니다.)
+**국내장 단일 트랙**에 집중합니다(해외/미국 관련 코드는 제거됨).
 현재 **모의투자** 모드로 동작합니다.
 
 ## 구조
@@ -21,7 +21,6 @@ ASAB/
    │  ├─ auth.py         # OAuth 토큰 발급·캐싱
    │  ├─ client.py       # REST 공통 클라이언트(스로틀·재시도·hashkey)
    │  ├─ domestic.py     # 국내 시세/주문/잔고
-   │  ├─ overseas.py     # 해외 시세/주문/잔고
    │  └─ marketdata.py   # 일봉/순위/투자자/재무 조회
    ├─ data/
    │  └─ store.py        # SQLite 저장소
@@ -77,7 +76,7 @@ python -m streamlit run dashboard.py
 
 ## 프로젝트 방향 (국내장 단일 트랙)
 
-목표는 **검증된 전략으로 실제 수익**. 미국장 관련 코드는 `archive/` 로 보존(비활성).
+목표는 **검증된 전략으로 실제 수익**. 국내장 단일 트랙에 집중(해외 코드 제거).
 검증 중심 로드맵: 다국면 데이터 → 시장국면 필터 → 상대강도 → 워크포워드 → 모의 포워드 → 실전.
 
 ## 시작하기
@@ -110,7 +109,7 @@ python -m src.run_bot          # 주기적 자동매매 (Ctrl+C 로 중지)
 ```
 
 ## 동작 방식
-- `config.yaml` 의 `domestic_symbols`, `overseas_symbols` 를 주기적으로 조회
+- `config.yaml` 의 `domestic_symbols` 를 주기적으로 조회
 - `sma_cross` 전략: 단기(5)·장기(20) 이동평균 골든크로스 시 매수, 데드크로스 시 매도
 - 종목당 `max_position_per_symbol` 수량까지만 보유
 
