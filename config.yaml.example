@@ -48,9 +48,16 @@ strategy:
   # regime_ma: 200           # 시장국면 판정 이동평균(일)
   #
   # --- 리스크 청산(2층) — 0이면 비활성 ---
-  # stop_loss_pct: 8         # 매입가 대비 -8% 손절
-  # trailing_pct: 5          # 보유 중 고점 대비 -5% 트레일링스톱
-  # take_profit_pct: 0       # +N% 익절(0=사용 안 함, 추세추종은 보통 트레일링만)
+  # ⚠️ 검증 결과(python -m src.tune_exits): 낙폭의 진짜 통제 수단은 손절이 아니라
+  #    위의 regime_filter 다. (국면필터만으로 MDD -70%→-42%). 손절은 보조 안전핀.
+  #    타이트한 손절(-8% 등)은 '휩쏘'로 수익을 깎으니 금지. 켤 거면 넓게(15~25%).
+  #    트레일링은 이 추세전략에선 전 구간 샤프 악화 → 기본 비활성 권장.
+  # stop_loss_pct: 20        # 꼬리위험 컷용 넓은 손절(권장 15~25, 0=끔)
+  # trailing_pct: 0          # 트레일링스톱(이 전략엔 비권장)
+  # take_profit_pct: 0       # +N% 익절(0=사용 안 함)
+  #
+  # 청산 파라미터 튜닝(공정 A/B):
+  #   python -m src.tune_exits --regime-filter   # 손절/트레일링 그리드 비교
   #
   # 실행 단계(안전 순서):
   #   python -m src.run_bot --plan       # 타깃만 확인 (API/주문 없음)

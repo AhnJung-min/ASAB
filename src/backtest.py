@@ -58,6 +58,7 @@ def run_backtest(
     cost_bps: float = 25.0,
     slippage_bps: float = 10.0,
     stop_loss_pct: float = 0.0,
+    trailing_pct: float = 0.0,
     require_financials: bool = True,
     regime_filter: bool = False,
     regime_ma: int = 200,
@@ -230,19 +231,23 @@ def run_backtest(
         bench_entry = close_by.get(BENCHMARK_SYMBOL, {}).get(t) if BENCHMARK_SYMBOL in series else None
         bench_last = bench_entry
 
-        # 손절 사용 시: 종목별 자본을 따로 추적(손절분은 현금화). stop_loss_pct=0 이면
-        # 기존(일별 동일비중 리밸런싱) 경로를 그대로 사용해 과거 검증치와 동일하게 유지.
-        use_stop = stop_loss_pct > 0 and picks
-        if use_stop:
-            stop_lvl = 1.0 - stop_loss_pct / 100.0
+        # 청산(손절/트레일링) 사용 시: 종목별 자본을 따로 추적(청산분은 현금화).
+        # 둘 다 0 이면 기존(일별 동일비중 리밸런싱) 경로를 그대로 사용해 과거 검증치 유지.
+        # ※ 무청산 매칭 기준선이 필요하면 stop_loss_pct=999 처럼 큰 값을 주면
+        #    같은 종목별 회계로 '발동 없는' 베이스라인이 된다(공정한 A/B용).
+        use_exit = (stop_loss_pct > 0 or trailing_pct > 0) and picks
+        if use_exit:
+            stop_lvl = 1.0 - stop_loss_pct / 100.0 if stop_loss_pct > 0 else 0.0
+            trail_lvl = 1.0 - trailing_pct / 100.0 if trailing_pct > 0 else 0.0
             name_eq = {s: 1.0 for s in picks}   # 진입가 대비 종목 자본배수
+            peak_eq = {s: 1.0 for s in picks}   # 보유 중 최고 배수(트레일링 기준)
             active = {s: True for s in picks}
             base_port = prev_port               # 진입 시점 포트폴리오 가치
 
         for k in range(i + 1, j_end + 1):
             d = dates[k]
-            if use_stop:
-                # 종목별 자본 갱신 + 손절 청산(이후 현금=배수 고정)
+            if use_exit:
+                # 종목별 자본 갱신 + 손절/트레일링 청산(이후 현금=배수 고정)
                 for s in picks:
                     if not active[s]:
                         continue
@@ -251,9 +256,14 @@ def run_backtest(
                     if c0 and c1:
                         name_eq[s] *= (c1 / c0)
                         last_close[s] = c1
-                        if name_eq[s] <= stop_lvl:   # 손절 발동 → 현금화(배수 고정)
-                            active[s] = False
-                # 포트폴리오 = 동일비중(진입 1/N) × 종목 자본배수 평균 (손절분 freeze)
+                        if name_eq[s] > peak_eq[s]:
+                            peak_eq[s] = name_eq[s]
+                        if stop_loss_pct > 0 and name_eq[s] <= stop_lvl:
+                            active[s] = False          # 손절
+                        elif (trailing_pct > 0 and peak_eq[s] > 1.0
+                              and name_eq[s] <= peak_eq[s] * trail_lvl):
+                            active[s] = False          # 트레일링(올랐던 종목만)
+                # 포트폴리오 = 동일비중(진입 1/N) × 종목 자본배수 평균 (청산분 freeze)
                 prev_port = base_port * (sum(name_eq.values()) / len(picks))
             else:
                 # 전략: 동일비중 종목들의 일별 수익률 평균
@@ -293,6 +303,7 @@ def run_backtest(
         "params": {
             "top_n": top_n, "hold_days": hold_days, "cost_bps": cost_bps,
             "slippage_bps": slippage_bps, "stop_loss_pct": stop_loss_pct,
+            "trailing_pct": trailing_pct,
             "regime_filter": regime_filter, "regime_ma": regime_ma,
         },
         "pool_size": len(pool),
@@ -344,6 +355,10 @@ def main() -> None:
                     help="슬리피지(bps, 유동성 낮을수록 자동 증폭). 0=비활성")
     ap.add_argument("--stop-loss-pct", type=float, default=0.0,
                     help="보유중 손절 %% (예: 8). 0=비활성. 켜면 손절분은 현금화")
+    ap.add_argument("--trailing-pct", type=float, default=0.0,
+                    help="보유중 고점 대비 트레일링스톱 %% (예: 15). 0=비활성")
+    ap.add_argument("--max-pool", type=int, default=0,
+                    help="유동성 상위 N종목으로 유니버스 제한(0=전체)")
     ap.add_argument("--include-etf", action="store_true")
     ap.add_argument("--regime-filter", action="store_true",
                     help="지수 이동평균 아래면 현금 보유(시장국면 필터)")
@@ -354,7 +369,8 @@ def main() -> None:
     res = run_backtest(
         store, top_n=args.top_n, hold_days=args.hold_days,
         cost_bps=args.cost_bps, slippage_bps=args.slippage_bps,
-        stop_loss_pct=args.stop_loss_pct,
+        stop_loss_pct=args.stop_loss_pct, trailing_pct=args.trailing_pct,
+        max_pool=(args.max_pool or None),
         require_financials=not args.include_etf,
         regime_filter=args.regime_filter, regime_ma=args.regime_ma,
     )
@@ -368,8 +384,10 @@ def main() -> None:
     p = res["params"]
     print(f"대상 종목 풀: {res['pool_size']}개 / 국면필터 {rf}(적용={res['regime_applied']})")
     sl = p.get("stop_loss_pct", 0)
+    tr = p.get("trailing_pct", 0)
     print(f"거래비용   : 수수료·세금 {p['cost_bps']:.0f}bps + 슬리피지 {p['slippage_bps']:.0f}bps(유동성차등)")
-    print(f"손절       : {('%.0f%%' % sl) if sl > 0 else 'OFF'}")
+    print(f"청산       : 손절 {('%.0f%%' % sl) if sl > 0 else 'OFF'} · "
+          f"트레일링 {('%.0f%%' % tr) if tr > 0 else 'OFF'}")
     print(f"누적수익률 : {m['total_return']*100:+.1f}%  (벤치마크 {m['bench_return']*100:+.1f}%)")
     print(f"CAGR       : {m['cagr']*100:+.1f}%")
     print(f"샤프지수   : {m['sharpe']:.2f}")
