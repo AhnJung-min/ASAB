@@ -77,6 +77,18 @@ def latest_universe() -> pd.DataFrame:
         return pd.DataFrame([dict(r) for r in cur.fetchall()])
 
 
+# --- 거래 저널 데이터 (라이브 매매 기록, DB만 읽음) ------------------------
+@st.cache_data(ttl=30)
+def journal_data() -> dict:
+    with open_store() as store:
+        signals = [dict(r) for r in store.recent_live_signals(200)]
+        orders = [dict(r) for r in store.recent_live_orders(200)]
+        positions = list(store.get_positions().values())
+        snaps = [dict(r) for r in store.account_snapshots(1000)]
+    return {"signals": signals, "orders": orders,
+            "positions": positions, "snaps": snaps}
+
+
 # --- 수집 현황 모니터 (실시간) ---------------------------------------------
 def _eta(logs):
     """최근 backfill 로그 타임스탬프로 수집 속도 추정 → (종목/초, span)."""
@@ -160,7 +172,8 @@ if st.sidebar.button("🔄 캐시 비우기 / 새로고침"):
 st.sidebar.caption("백테스트·스크리너는 CLI에서:\n`python -m src.walkforward`")
 
 st.title("📡 ASAB 대시보드")
-tab_collect, tab_model, tab_data = st.tabs(["📡 수집 현황", "🤖 모델", "🗂 데이터"])
+tab_collect, tab_model, tab_journal, tab_data = st.tabs(
+    ["📡 수집 현황", "🤖 모델", "🧾 거래저널", "🗂 데이터"])
 
 with tab_collect:
     collection_progress()
@@ -222,6 +235,75 @@ with tab_model:
             verdict = ("✅ ML이 모멘텀보다 위험효율(샤프) 우위" if ml_sh > mom_sh
                        else "⚠️ 이번 설정에선 ML이 모멘텀을 못 이김")
             st.info(f"{verdict}. (절대수익은 강세장 영향 → 상대비교가 핵심)")
+
+# --- 거래 저널 탭 ----------------------------------------------------------
+with tab_journal:
+    st.subheader("🧾 거래 저널 (라이브 매매 기록)")
+    st.caption("run_bot(screener_rotation)이 남긴 신호·주문·포지션·계좌 기록. DB만 읽음.")
+    j = journal_data()
+    snaps, positions, orders, signals = j["snaps"], j["positions"], j["orders"], j["signals"]
+
+    if not (snaps or orders or signals or positions):
+        st.info("아직 라이브 매매 기록이 없습니다.\n\n"
+                "• 미리보기(주문 없음): `python -m src.run_bot --plan`\n"
+                "• 모의주문 1회(평일 장중): `python -m src.run_bot --once`\n\n"
+                "전략을 screener_rotation 으로 설정해야 합니다(config.yaml).")
+    else:
+        # 1) 계좌 요약 + 자산추이
+        if snaps:
+            last = snaps[-1]
+            c = st.columns(4)
+            c[0].metric("총자산", f"₩{last['total_krw']:,.0f}")
+            c[1].metric("현금", f"₩{last['cash_krw']:,.0f}")
+            c[2].metric("주식평가", f"₩{last['holdings_krw']:,.0f}")
+            c[3].metric("평가손익", f"₩{last['unrealized_krw']:,.0f}")
+            sdf = pd.DataFrame(snaps)
+            sdf["ts"] = pd.to_datetime(sdf["ts"])
+            sdf = sdf.set_index("ts")
+            st.caption(f"계좌 자산추이 ({len(snaps)} 스냅샷)")
+            st.line_chart(sdf[["total_krw", "cash_krw", "holdings_krw"]].rename(
+                columns={"total_krw": "총자산", "cash_krw": "현금", "holdings_krw": "주식평가"}))
+
+        # 2) 현재 포지션(트레일링 고점 추적)
+        st.subheader("📦 현재 포지션")
+        if positions:
+            pdf = pd.DataFrame(positions)
+            pdf["고점수익%"] = pdf.apply(
+                lambda r: (r["peak_price"] / r["entry_price"] - 1) * 100
+                if r["entry_price"] else 0.0, axis=1)
+            pdf = pdf[["symbol", "name", "qty", "entry_price", "peak_price", "고점수익%", "updated_ts"]]
+            pdf.columns = ["코드", "종목", "수량", "평균매입가", "보유중고점", "고점수익%", "갱신"]
+            st.dataframe(pdf.style.format(
+                {"평균매입가": "{:,.0f}", "보유중고점": "{:,.0f}", "고점수익%": "{:+.1f}"}),
+                width="stretch", hide_index=True)
+            st.caption("※ 실시간 현재가·손익은 봇(run_bot) 또는 KIS 앱에서 확인(대시보드는 API 미호출).")
+        else:
+            st.caption("보유 포지션 없음(현금).")
+
+        # 3) 최근 주문
+        st.subheader("🧾 최근 주문")
+        if orders:
+            odf = pd.DataFrame(orders)
+            side_icon = {"buy": "🟢 매수", "sell": "🔴 매도"}
+            dvsn = {"00": "지정가", "01": "시장가"}
+            odf["구분"] = odf["side"].map(side_icon).fillna(odf["side"])
+            odf["유형"] = odf["ord_dvsn"].map(dvsn).fillna(odf["ord_dvsn"])
+            view = odf[["ts", "구분", "name", "qty", "price", "유형", "mode", "status", "msg"]]
+            view.columns = ["시각", "구분", "종목", "수량", "가격", "유형", "모드", "상태", "메시지"]
+            st.dataframe(view, width="stretch", hide_index=True, height=280)
+        else:
+            st.caption("주문 기록 없음.")
+
+        # 4) 최근 신호
+        st.subheader("📨 최근 신호")
+        if signals:
+            gdf = pd.DataFrame(signals)
+            view = gdf[["ts", "action", "name", "rank", "score", "reason"]]
+            view.columns = ["시각", "액션", "종목", "순위", "점수", "사유"]
+            st.dataframe(view, width="stretch", hide_index=True, height=280)
+        else:
+            st.caption("신호 기록 없음.")
+
 
 with tab_data:
     st.subheader("🗂 수집 데이터 상세")
