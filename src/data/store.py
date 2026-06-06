@@ -125,6 +125,31 @@ CREATE TABLE IF NOT EXISTS loan_trans (
     loan_rmnd_amt   INTEGER,  -- 당일 잔고 금액
     PRIMARY KEY (symbol, date)
 );
+-- === 라이브 거래 저널 (자동매매 의사결정·주문 기록) =====================
+-- 리밸런스 시점의 타깃/매매 신호 (모의 포워드 추적용)
+CREATE TABLE IF NOT EXISTS live_signal (
+    id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts     TEXT NOT NULL,     -- 신호 생성 시각
+    asof   TEXT,              -- 신호 산출 기준 데이터 날짜(YYYYMMDD)
+    source TEXT,              -- screener_rotation 등 신호 출처
+    symbol TEXT, name TEXT,
+    rank   INTEGER, score REAL,
+    action TEXT,              -- target | buy | sell | hold | skip
+    reason TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_live_signal_id ON live_signal(id);
+-- 실제(또는 모의/드라이런) 주문 기록
+CREATE TABLE IF NOT EXISTS live_order (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts       TEXT NOT NULL,
+    symbol   TEXT, name TEXT,
+    side     TEXT,            -- buy | sell
+    qty      INTEGER, price INTEGER, ord_dvsn TEXT,  -- ord_dvsn: 00 지정가/01 시장가
+    mode     TEXT,            -- paper | real | dryrun
+    status   TEXT,            -- sent | rejected | dryrun
+    rt_cd    TEXT, msg TEXT, order_no TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_live_order_id ON live_order(id);
 """
 
 
@@ -387,6 +412,40 @@ class DataStore:
             "SELECT * FROM (SELECT * FROM account_snapshot ORDER BY ts DESC LIMIT ?) "
             "ORDER BY ts", (limit,)
         ).fetchall()
+
+    # --- 라이브 거래 저널 ---------------------------------------------------
+    def add_live_signals(self, ts: str, source: str, asof: str | None,
+                         rows: Iterable[dict[str, Any]]) -> int:
+        data = [
+            (ts, asof, source, r["symbol"], r.get("name"),
+             r.get("rank"), r.get("score"), r["action"], r.get("reason"))
+            for r in rows
+        ]
+        self.conn.executemany(
+            "INSERT INTO live_signal "
+            "(ts,asof,source,symbol,name,rank,score,action,reason) "
+            "VALUES (?,?,?,?,?,?,?,?,?)", data)
+        self.conn.commit()
+        return len(data)
+
+    def add_live_order(self, o: dict[str, Any]) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO live_order "
+            "(ts,symbol,name,side,qty,price,ord_dvsn,mode,status,rt_cd,msg,order_no) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (o["ts"], o["symbol"], o.get("name"), o["side"], o["qty"],
+             o.get("price", 0), o.get("ord_dvsn"), o.get("mode"), o.get("status"),
+             o.get("rt_cd"), o.get("msg"), o.get("order_no")))
+        self.conn.commit()
+        return cur.lastrowid
+
+    def recent_live_signals(self, limit: int = 100) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM live_signal ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+
+    def recent_live_orders(self, limit: int = 100) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM live_order ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
 
     # --- 읽기 ---------------------------------------------------------------
     def latest_date(self, symbol: str) -> str | None:
