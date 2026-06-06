@@ -150,6 +150,16 @@ CREATE TABLE IF NOT EXISTS live_order (
     rt_cd    TEXT, msg TEXT, order_no TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_live_order_id ON live_order(id);
+-- 보유 포지션 상태(트레일링 고점 영속화 — --once 재시작에도 고점 유지)
+CREATE TABLE IF NOT EXISTS live_position (
+    symbol      TEXT PRIMARY KEY,
+    name        TEXT,
+    entry_price REAL,    -- 평균 매입가(잔고 기준 동기화)
+    peak_price  REAL,    -- 보유 중 최고가(트레일링 기준)
+    qty         INTEGER,
+    opened_ts   TEXT,
+    updated_ts  TEXT
+);
 """
 
 
@@ -446,6 +456,27 @@ class DataStore:
     def recent_live_orders(self, limit: int = 100) -> list[sqlite3.Row]:
         return self.conn.execute(
             "SELECT * FROM live_order ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+
+    # --- 보유 포지션 상태(트레일링 고점) ----------------------------------
+    def get_positions(self) -> dict[str, dict[str, Any]]:
+        return {r["symbol"]: dict(r)
+                for r in self.conn.execute("SELECT * FROM live_position")}
+
+    def save_position(self, symbol: str, name: str, entry_price: float,
+                      peak_price: float, qty: int, opened_ts: str, ts: str) -> None:
+        self.conn.execute(
+            "INSERT INTO live_position "
+            "(symbol,name,entry_price,peak_price,qty,opened_ts,updated_ts) "
+            "VALUES (?,?,?,?,?,?,?) "
+            "ON CONFLICT(symbol) DO UPDATE SET "
+            "name=excluded.name, entry_price=excluded.entry_price, "
+            "peak_price=excluded.peak_price, qty=excluded.qty, updated_ts=excluded.updated_ts",
+            (symbol, name, entry_price, peak_price, qty, opened_ts, ts))
+        self.conn.commit()
+
+    def delete_position(self, symbol: str) -> None:
+        self.conn.execute("DELETE FROM live_position WHERE symbol=?", (symbol,))
+        self.conn.commit()
 
     # --- 읽기 ---------------------------------------------------------------
     def latest_date(self, symbol: str) -> str | None:
