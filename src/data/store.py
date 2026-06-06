@@ -56,23 +56,6 @@ CREATE TABLE IF NOT EXISTS stock_master (
     group_code TEXT,    -- ST(주권) 등
     liquidity REAL      -- 시가총액(억원). 수집 우선순위/품질 기준
 );
--- 급등주 스캔 스냅샷 (학습용 누적)
-CREATE TABLE IF NOT EXISTS surge_scan (
-    ts       TEXT NOT NULL,
-    exchange TEXT, symbol TEXT, name TEXT,
-    price    REAL, rate REAL, volume INTEGER
-);
-CREATE INDEX IF NOT EXISTS idx_surge_scan_ts ON surge_scan(ts);
--- 급등주 매매 기록 (진입~청산)
-CREATE TABLE IF NOT EXISTS surge_trade (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    symbol TEXT, name TEXT, exchange TEXT,
-    entry_ts TEXT, entry_price REAL, qty INTEGER,
-    entry_rate REAL, entry_volume INTEGER,
-    exit_ts TEXT, exit_price REAL,
-    pnl REAL, pnl_pct REAL, reason TEXT, hold_sec INTEGER,
-    status TEXT NOT NULL DEFAULT 'open'   -- open | closed
-);
 -- 계좌 자산 추이 (시간별 누적, 원화 기준)
 CREATE TABLE IF NOT EXISTS account_snapshot (
     ts TEXT NOT NULL,
@@ -362,50 +345,6 @@ class DataStore:
         return self.conn.execute(
             "SELECT ts,kind,symbol,name,detail FROM collect_log "
             "ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
-
-    # --- 급등주 스캔/매매 ---------------------------------------------------
-    def save_surge_scan(self, ts: str, rows: Iterable[dict[str, Any]]) -> int:
-        data = [
-            (ts, r["exchange"], r["symbol"], r["name"], r["price"], r["rate"], r["volume"])
-            for r in rows
-        ]
-        self.conn.executemany(
-            "INSERT INTO surge_scan (ts,exchange,symbol,name,price,rate,volume) "
-            "VALUES (?,?,?,?,?,?,?)",
-            data,
-        )
-        self.conn.commit()
-        return len(data)
-
-    def open_trade(self, t: dict[str, Any]) -> int:
-        cur = self.conn.execute(
-            "INSERT INTO surge_trade "
-            "(symbol,name,exchange,entry_ts,entry_price,qty,entry_rate,entry_volume,status) "
-            "VALUES (?,?,?,?,?,?,?,?,'open')",
-            (t["symbol"], t["name"], t["exchange"], t["entry_ts"], t["entry_price"],
-             t["qty"], t.get("entry_rate"), t.get("entry_volume")),
-        )
-        self.conn.commit()
-        return cur.lastrowid
-
-    def close_trade(self, trade_id: int, exit_ts: str, exit_price: float,
-                    pnl: float, pnl_pct: float, reason: str, hold_sec: int) -> None:
-        self.conn.execute(
-            "UPDATE surge_trade SET exit_ts=?, exit_price=?, pnl=?, pnl_pct=?, "
-            "reason=?, hold_sec=?, status='closed' WHERE id=?",
-            (exit_ts, exit_price, pnl, pnl_pct, reason, hold_sec, trade_id),
-        )
-        self.conn.commit()
-
-    def open_trades(self) -> list[sqlite3.Row]:
-        return self.conn.execute(
-            "SELECT * FROM surge_trade WHERE status='open'"
-        ).fetchall()
-
-    def recent_trades(self, limit: int = 50) -> list[sqlite3.Row]:
-        return self.conn.execute(
-            "SELECT * FROM surge_trade ORDER BY id DESC LIMIT ?", (limit,)
-        ).fetchall()
 
     def save_account_snapshot(self, ts: str, s: dict[str, Any]) -> None:
         self.conn.execute(

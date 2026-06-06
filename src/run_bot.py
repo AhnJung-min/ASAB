@@ -20,7 +20,6 @@ from .data.store import DataStore
 from .kis.client import KISApiError, KISClient
 from .kis.config import load_config
 from .kis.domestic import DomesticStock
-from .kis.overseas import OverseasStock
 from .portfolio import target_portfolio
 from .pricing import limit_price
 from .strategy import Signal, build_strategy
@@ -63,12 +62,10 @@ def run(once: bool = False) -> None:
 
     client = KISClient(cfg)
     dom = DomesticStock(client)
-    ovs = OverseasStock(client)
     strategy = build_strategy(cfg.strategy)
 
     t = cfg.trading
     dom_symbols: list[str] = t.get("domestic_symbols", [])
-    ovs_symbols: list[dict] = t.get("overseas_symbols", [])
     interval = int(t.get("poll_interval_sec", 10))
     qty = int(t.get("order_qty", 1))
     max_pos = int(t.get("max_position_per_symbol", 5))
@@ -89,7 +86,6 @@ def run(once: bool = False) -> None:
             log(f"    -> 매도 주문: {res.get('msg1', res)}")
 
     def tick() -> None:
-        # 국내
         for sym in dom_symbols:
             try:
                 price = dom.current_price(sym)
@@ -102,21 +98,6 @@ def run(once: bool = False) -> None:
                 )
             except KISApiError as e:
                 log(f"  KR {sym}: API 오류 {e}")
-
-        # 해외
-        for item in ovs_symbols:
-            exch, sym = item["exchange"], item["symbol"]
-            try:
-                price = ovs.current_price(exch, sym)
-                sig = strategy.update(f"US:{sym}", price)
-                handle(
-                    f"US {sym}", price, sig,
-                    do_buy=lambda e=exch, s=sym, p=price: ovs.buy(e, s, qty, p),
-                    do_sell=lambda e=exch, s=sym, p=price: ovs.sell(e, s, qty, p),
-                    get_pos=lambda s=sym: ovs.position_qty(s),
-                )
-            except KISApiError as e:
-                log(f"  US {sym}: API 오류 {e}")
 
     if once:
         tick()

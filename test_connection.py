@@ -12,7 +12,6 @@ if hasattr(sys.stdout, "reconfigure"):
 from src.kis.client import KISClient
 from src.kis.config import load_config
 from src.kis.domestic import DomesticStock
-from src.kis.overseas import OverseasStock
 
 
 def main() -> None:
@@ -29,11 +28,7 @@ def main() -> None:
     print("\n[2] 국내 시세 (삼성전자 005930)...")
     print(f"    현재가: {dom.current_price('005930'):,} 원")
 
-    ovs = OverseasStock(client)
-    print("\n[3] 해외 시세 (AAPL @ NAS)...")
-    print(f"    현재가: ${ovs.current_price('NAS', 'AAPL')}")
-
-    print("\n[4] 국내 잔고...")
+    print("\n[3] 국내 잔고...")
     bal = dom.balance()
     print(f"    예수금: {bal['cash']:,} 원, 보유종목 {len(bal['holdings'])}개")
     for h in bal["holdings"]:
