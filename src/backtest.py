@@ -7,6 +7,11 @@
   - t시점 결정은 t시점까지의 종가만 사용
   - 수익은 t -> t+h 의 미래 종가로 실현 (결정 이후 구간)
 종가-종가 기준이며, 거래비용은 회전율에 bps로 부과한다.
+
+거래비용 = ① 수수료·세금(cost_bps) + ② 슬리피지(slippage_bps, 유동성 차등).
+  슬리피지는 체결가가 밀리는 비용으로 수수료와 별개다. 유동성이 낮은 종목일수록
+  시장충격이 커지므로, 최근 거래대금(ADV) 기준 sqrt(REF/ADV) 배수(1~IMPACT_CAP)를
+  곱해 보수적으로 키운다. ADV가 REF 이상이면 배수 1.0(추가 충격 없음).
 """
 from __future__ import annotations
 
@@ -23,6 +28,9 @@ from .data.store import DataStore
 from .screener import assign_scores, compute_factors
 
 BENCHMARK_SYMBOL = "069500"  # KODEX 200 (있으면 벤치마크로 사용)
+IMPACT_REF_VALUE = 3_000_000_000  # 슬리피지 배수 1.0 기준 ADV(원). 이상이면 충격 無
+IMPACT_CAP = 5.0                   # 저유동성 종목 슬리피지 배수 상한
+ADV_WINDOW = 20                   # ADV(평균 거래대금) 산정 일수
 
 
 def _load_series(store: DataStore) -> dict[str, list[dict]]:
@@ -48,6 +56,7 @@ def run_backtest(
     top_n: int = 3,
     hold_days: int = 20,
     cost_bps: float = 25.0,
+    slippage_bps: float = 10.0,
     require_financials: bool = True,
     regime_filter: bool = False,
     regime_ma: int = 200,
@@ -97,6 +106,23 @@ def run_backtest(
     idx_by: dict[str, dict[str, int]] = {
         s: {r["date"]: i for i, r in enumerate(series[s])} for s in pool
     }
+    # 종목별 거래대금 배열 : 슬리피지(시장충격) 산정용 ADV 계산
+    value_by: dict[str, list[int]] = {
+        s: [r.get("value") or 0 for r in series[s]] for s in pool
+    }
+
+    def slip_mult_asof(s: str, t: str) -> float:
+        """t시점 최근 ADV로 유동성 차등 슬리피지 배수(1.0~IMPACT_CAP)."""
+        end = idx_by[s].get(t)
+        if end is None or end < 1:
+            return 1.0
+        win = [v for v in value_by[s][max(0, end - ADV_WINDOW + 1): end + 1] if v > 0]
+        if not win:
+            return 1.0
+        adv = sum(win) / len(win)
+        if adv <= 0:
+            return IMPACT_CAP
+        return min(max((IMPACT_REF_VALUE / adv) ** 0.5, 1.0), IMPACT_CAP)
 
     # --- 벤치마크(지수) 배열: 레짐 필터 + 상대강도에 공통 사용 ---
     has_bench = BENCHMARK_SYMBOL in series
@@ -131,6 +157,8 @@ def run_backtest(
         return regime_on.get(t, True) if has_regime else True
 
     cost = cost_bps / 10_000.0
+    slip = slippage_bps / 10_000.0
+    slippage_drag = 0.0  # 슬리피지 누적 손실(투명성용)
     in_market_days = 0
     span_days = 0
     equity = 1.0
@@ -176,8 +204,16 @@ def run_backtest(
 
         # 회전율 기반 거래비용 (교체된 비중만큼, 0~1 정규화)
         denom = max(len(picks), len(prev_holdings), 1)
-        turnover = len(set(picks) ^ set(prev_holdings)) / denom
-        equity *= (1 - cost * turnover)
+        traded = set(picks) ^ set(prev_holdings)
+        turnover = len(traded) / denom
+        # 슬리피지: 매매된 종목별 유동성 차등 배수의 평균 × 회전율
+        if traded and slip > 0:
+            avg_slip = sum(slip * slip_mult_asof(s, t) for s in traded) / len(traded)
+        else:
+            avg_slip = 0.0
+        slip_rate = avg_slip * turnover
+        slippage_drag += slip_rate
+        equity *= (1 - cost * turnover - slip_rate)
         prev_holdings = picks
 
         holdings_log.append({"date": t, "picks": picks,
@@ -224,12 +260,14 @@ def run_backtest(
 
     metrics = _metrics(curve)
     metrics["time_in_market"] = (in_market_days / span_days) if span_days else 1.0
+    metrics["slippage_drag"] = slippage_drag  # 슬리피지로 인한 누적 손실(근사)
     return {
         "curve": curve,
         "metrics": metrics,
         "holdings_log": holdings_log,
         "params": {
             "top_n": top_n, "hold_days": hold_days, "cost_bps": cost_bps,
+            "slippage_bps": slippage_bps,
             "regime_filter": regime_filter, "regime_ma": regime_ma,
         },
         "pool_size": len(pool),
@@ -276,7 +314,9 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="팩터 로테이션 백테스트")
     ap.add_argument("--top-n", type=int, default=3)
     ap.add_argument("--hold-days", type=int, default=20)
-    ap.add_argument("--cost-bps", type=float, default=25.0)
+    ap.add_argument("--cost-bps", type=float, default=25.0, help="수수료·세금(bps)")
+    ap.add_argument("--slippage-bps", type=float, default=10.0,
+                    help="슬리피지(bps, 유동성 낮을수록 자동 증폭). 0=비활성")
     ap.add_argument("--include-etf", action="store_true")
     ap.add_argument("--regime-filter", action="store_true",
                     help="지수 이동평균 아래면 현금 보유(시장국면 필터)")
@@ -286,7 +326,8 @@ def main() -> None:
     store = DataStore()
     res = run_backtest(
         store, top_n=args.top_n, hold_days=args.hold_days,
-        cost_bps=args.cost_bps, require_financials=not args.include_etf,
+        cost_bps=args.cost_bps, slippage_bps=args.slippage_bps,
+        require_financials=not args.include_etf,
         regime_filter=args.regime_filter, regime_ma=args.regime_ma,
     )
     store.close()
@@ -296,13 +337,16 @@ def main() -> None:
         return
     m = res["metrics"]
     rf = "ON" if res["params"]["regime_filter"] else "OFF"
+    p = res["params"]
     print(f"대상 종목 풀: {res['pool_size']}개 / 국면필터 {rf}(적용={res['regime_applied']})")
+    print(f"거래비용   : 수수료·세금 {p['cost_bps']:.0f}bps + 슬리피지 {p['slippage_bps']:.0f}bps(유동성차등)")
     print(f"누적수익률 : {m['total_return']*100:+.1f}%  (벤치마크 {m['bench_return']*100:+.1f}%)")
     print(f"CAGR       : {m['cagr']*100:+.1f}%")
     print(f"샤프지수   : {m['sharpe']:.2f}")
     print(f"최대낙폭   : {m['mdd']*100:.1f}%")
     print(f"연변동성   : {m['volatility']*100:.1f}%")
     print(f"투자기간비율: {m['time_in_market']*100:.0f}%  (나머지는 현금)")
+    print(f"슬리피지 손실: 누적 약 -{m['slippage_drag']*100:.1f}%p (체결 밀림 추정)")
 
 
 if __name__ == "__main__":

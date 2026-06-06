@@ -7,6 +7,11 @@
 인샘플 최적(전구간을 보고 고른 최고)과 비교해 **과적합 정도**를 드러낸다.
 
 핵심: 인샘플은 항상 좋아 보인다. WF(OOS)가 인샘플보다 크게 나쁘면 과적합 신호.
+
+[정보 누수 방지 — Embargo]
+백테스트는 종목을 hold_days(기본 20거래일) 보유한다. 학습구간 '마지막' 매매의
+수익은 구간 종료 후 hold_days 뒤에 실현되므로 검증구간 초반과 겹친다(누수).
+train 끝과 test 시작 사이에 embargo(기본 HOLD 거래일)만큼 비워 이 겹침을 없앤다.
 """
 from __future__ import annotations
 
@@ -31,6 +36,8 @@ TEST_DAYS = 126    # 검증 ~6개월
 MAX_POOL = 200     # 유동성 상위 200종목
 HOLD = 20
 COST = 25.0
+SLIPPAGE = 10.0    # 슬리피지(bps, 유동성 차등) — 백테스트와 동일 가정
+EMBARGO = HOLD     # train↔test 사이 비우는 거래일(=보유기간 → 누수 0)
 
 
 def _calendar(series: dict) -> list[str]:
@@ -60,7 +67,7 @@ def _metrics_from_equity(eq: list[float], bench: list[float]) -> dict:
 
 
 def run_wf(store: DataStore, train_days=TRAIN_DAYS, test_days=TEST_DAYS,
-           max_pool=MAX_POOL) -> dict:
+           max_pool=MAX_POOL, embargo=EMBARGO) -> dict:
     series = _load_series(store)
     if not series:
         return {"error": "데이터가 없습니다."}
@@ -68,17 +75,19 @@ def run_wf(store: DataStore, train_days=TRAIN_DAYS, test_days=TEST_DAYS,
     start = 220  # 워밍업(200일선+여유) 후 시작
     folds = []
     k = start
-    while k + train_days + test_days <= len(cal):
+    # embargo: 학습 끝과 검증 시작 사이를 비워 보유기간 수익 겹침(누수) 제거
+    while k + train_days + embargo + test_days <= len(cal):
+        te0 = k + train_days + embargo
         folds.append((cal[k], cal[k + train_days - 1],
-                      cal[k + train_days], cal[k + train_days + test_days - 1]))
+                      cal[te0], cal[te0 + test_days - 1]))
         k += test_days
     if not folds:
         return {"error": f"기간 부족: 폴드 생성 불가 (거래일 {len(cal)}일). "
                 "데이터가 더 쌓이면 다시 시도하세요."}
 
     def bt(cfg, s, e):
-        return run_backtest(store, hold_days=HOLD, cost_bps=COST, max_pool=max_pool,
-                            start_date=s, end_date=e, series=series, **cfg)
+        return run_backtest(store, hold_days=HOLD, cost_bps=COST, slippage_bps=SLIPPAGE,
+                            max_pool=max_pool, start_date=s, end_date=e, series=series, **cfg)
 
     fold_rows = []
     eq, beq = [1.0], [1.0]
@@ -136,10 +145,12 @@ def main() -> None:
     ap.add_argument("--train-days", type=int, default=TRAIN_DAYS)
     ap.add_argument("--test-days", type=int, default=TEST_DAYS)
     ap.add_argument("--max-pool", type=int, default=MAX_POOL)
+    ap.add_argument("--embargo", type=int, default=EMBARGO,
+                    help="train↔test 사이 비우는 거래일(누수 방지, 기본 20=보유기간)")
     args = ap.parse_args()
 
     store = DataStore()
-    res = run_wf(store, args.train_days, args.test_days, args.max_pool)
+    res = run_wf(store, args.train_days, args.test_days, args.max_pool, args.embargo)
     store.close()
     if "error" in res:
         print(res["error"])

@@ -54,10 +54,16 @@ def symbol_daily(symbol: str) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def ml_run(top_n: int, max_pool: int, hold_days: int = 20) -> dict:
+def ml_run(top_n: int, max_pool: int, hold_days: int = 20, embargo: int = 1) -> dict:
     with open_store() as store:
         ds = build_dataset(store, hold_days=hold_days, max_pool=max_pool)
-    return run_ml_wf(ds, top_n=top_n)
+    res = run_ml_wf(ds, top_n=top_n, embargo=embargo)
+    # 누수 전·후 비교용: embargo=0(누수 포함) 성과를 함께 계산
+    if "error" not in res and embargo > 0:
+        leak = run_ml_wf(ds, top_n=top_n, embargo=0)
+        if "error" not in leak:
+            res["leak"] = {"ml": leak["ml"], "mom": leak["mom"]}
+    return res
 
 
 @st.cache_data(ttl=120)
@@ -162,11 +168,14 @@ with tab_collect:
 # --- ML 모델 탭 ------------------------------------------------------------
 with tab_model:
     st.subheader("🤖 ML 예측 모델 (LightGBM 워크포워드)")
-    cc1, cc2 = st.columns(2)
+    cc1, cc2, cc3 = st.columns(3)
     m_topn = cc1.slider("상위 N 종목", 5, 30, 10)
     m_pool = cc2.slider("유니버스(유동성 상위)", 100, 500, 300, step=50)
+    m_emb = cc3.slider("Embargo(누수방지, 리밸런스)", 0, 3, 1,
+                       help="train↔test 사이를 비우는 구간 수. 1이면 라벨 겹침(누수) 제거. "
+                            "0은 누수 포함(낙관 편향)")
     if st.button("▶ 학습·검증 실행 (1~2분 소요)"):
-        st.session_state["ml_go"] = (m_topn, m_pool)
+        st.session_state["ml_go"] = (m_topn, m_pool, m_emb)
 
     go = st.session_state.get("ml_go")
     if not go:
@@ -174,17 +183,32 @@ with tab_model:
                    "결과는 캐시되어 재조회는 즉시)")
     else:
         with st.spinner("데이터셋 생성 + LightGBM 워크포워드 검증 중... (1~2분)"):
-            res = ml_run(go[0], go[1])
+            res = ml_run(go[0], go[1], embargo=go[2])
         if "error" in res:
             st.warning(res["error"])
         else:
             st.caption(f"OOS {res['n_test']}기간 · {res['span'][0]}~{res['span'][1]} · "
-                       f"학습데이터 {res['dataset_rows']:,}행 · top{go[0]} / 유니버스{go[1]}")
+                       f"학습데이터 {res['dataset_rows']:,}행 · top{go[0]} / 유니버스{go[1]} · "
+                       f"embargo={res.get('embargo', 0)}구간")
             cols = st.columns(3)
             for col, (k, label) in zip(cols, [("ml", "ML(LGBM)"), ("mom", "모멘텀"), ("mkt", "시장(평균)")]):
                 m = res[k]
                 col.metric(f"{label} 샤프", f"{m['sharpe']:.2f}",
                            f"누적 {m['total']*100:.0f}% · MDD {m['mdd']*100:.0f}%")
+
+            # 정보 누수 전·후 비교 (embargo>0 일 때만)
+            if res.get("leak"):
+                lm, cm = res["leak"]["ml"], res["ml"]
+                d_sh = lm["sharpe"] - cm["sharpe"]
+                d_ret = (lm["total"] - cm["total"]) * 100
+                with st.expander(f"🔬 정보 누수 영향: 샤프 +{d_sh:.2f} · 누적 +{d_ret:.0f}%p 부풀려짐", expanded=True):
+                    cmp_df = pd.DataFrame(
+                        {"샤프": [lm["sharpe"], cm["sharpe"]],
+                         "누적수익%": [lm["total"] * 100, cm["total"] * 100]},
+                        index=["누수 포함 (embargo=0)", f"보정 (embargo={res['embargo']})"])
+                    st.dataframe(cmp_df.style.format("{:.2f}"), width="stretch")
+                    st.caption("train↔test 경계에서 라벨이 겹치면 OOS 성과가 실제보다 좋아 보입니다. "
+                               "위 차이만큼이 '누수로 부풀려진' 가짜 성과입니다. 보정값이 진짜 실력에 가깝습니다.")
             cv = res["curves"]
             curve_df = pd.DataFrame(
                 {"ML": cv["ml"], "모멘텀": cv["mom"], "시장": cv["mkt"]},

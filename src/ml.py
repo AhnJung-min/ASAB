@@ -7,6 +7,13 @@
 모멘텀(단순 ret_60) 베이스라인 및 시장(전체평균)과 비교한다.
 
 핵심 질문: ML이 규칙기반(모멘텀)보다 정말 알파를 더 내는가?
+
+[정보 누수 방지 — Purge & Embargo]
+라벨 fwd_ret 은 t→t+hold(=리밸런스 1구간) 미래를 본다. 따라서 학습구간의
+'마지막' 리밸런스 라벨은 검증구간 첫 시점과 겹친다(미래정보 누수). train 과
+test 사이에 embargo(기본 1구간)만큼 비워(=마지막 학습구간을 버려) 이 겹침을
+제거한다. embargo=0 으로 돌리면 누수 포함(낙관 편향) 결과를 볼 수 있어,
+대시보드/CLI 에서 전·후를 비교하면 누수가 성과를 얼마나 부풀렸는지 드러난다.
 """
 from __future__ import annotations
 
@@ -27,6 +34,7 @@ from .features import FEATURES, build_dataset
 
 TRAIN_PERIODS = 36   # 학습 리밸런스 수 (~3년)
 TEST_PERIODS = 6     # 검증 리밸런스 수 (~6개월)
+EMBARGO = 1          # train↔test 사이 비우는 리밸런스 수(라벨=1구간 미래 → 1이면 누수 0)
 TOP_N = 10
 
 
@@ -51,23 +59,26 @@ def _metrics(period_rets: list[float], ppy: float = 12.0) -> dict:
 
 
 def run_ml_wf(dataset, train_periods=TRAIN_PERIODS, test_periods=TEST_PERIODS,
-              top_n=TOP_N) -> dict:
+              top_n=TOP_N, embargo=EMBARGO) -> dict:
     import lightgbm as lgb
 
     dates = sorted({d["date"] for d in dataset})
     by_date = {}
     for row in dataset:
         by_date.setdefault(row["date"], []).append(row)
-    if len(dates) < train_periods + test_periods:
-        return {"error": f"리밸런스 기간 부족({len(dates)} < {train_periods+test_periods}). "
+    need = train_periods + embargo + test_periods
+    if len(dates) < need:
+        return {"error": f"리밸런스 기간 부족({len(dates)} < {need}). "
                 "데이터가 더 필요합니다."}
 
     ml_rets, mom_rets, mkt_rets = [], [], []
     test_span = []
     k = 0
-    while k + train_periods + test_periods <= len(dates):
+    while k + train_periods + embargo + test_periods <= len(dates):
         tr_dates = dates[k:k + train_periods]
-        te_dates = dates[k + train_periods:k + train_periods + test_periods]
+        # embargo: 학습 끝과 검증 시작 사이를 비워 라벨 겹침(누수) 제거
+        te0 = k + train_periods + embargo
+        te_dates = dates[te0:te0 + test_periods]
 
         # 학습셋
         tr = [r for d in tr_dates for r in by_date[d]]
@@ -113,7 +124,7 @@ def run_ml_wf(dataset, train_periods=TRAIN_PERIODS, test_periods=TEST_PERIODS,
     return {
         "ml": _metrics(ml_rets), "mom": _metrics(mom_rets), "mkt": _metrics(mkt_rets),
         "n_test": len(ml_rets), "span": (test_span[0], test_span[-1]) if test_span else None,
-        "dataset_rows": len(dataset),
+        "dataset_rows": len(dataset), "embargo": embargo,
         "curves": {"dates": test_span, "ml": _cum(ml_rets),
                    "mom": _cum(mom_rets), "mkt": _cum(mkt_rets)},
         "importance": importance,
@@ -125,6 +136,10 @@ def main() -> None:
     ap.add_argument("--hold-days", type=int, default=20)
     ap.add_argument("--max-pool", type=int, default=300)
     ap.add_argument("--top-n", type=int, default=TOP_N)
+    ap.add_argument("--embargo", type=int, default=EMBARGO,
+                    help="train↔test 사이 비우는 리밸런스 수(누수 방지, 기본 1)")
+    ap.add_argument("--no-compare", action="store_true",
+                    help="누수 포함(embargo=0) 대비 비교 출력 생략")
     args = ap.parse_args()
 
     store = DataStore()
@@ -133,16 +148,31 @@ def main() -> None:
     store.close()
     print(f"  {len(ds):,}행", flush=True)
 
-    res = run_ml_wf(ds, top_n=args.top_n)
+    res = run_ml_wf(ds, top_n=args.top_n, embargo=args.embargo)
     if "error" in res:
         print(res["error"]); return
 
-    print(f"\n검증 OOS: {res['n_test']}기간 ({res['span'][0]}~{res['span'][1]})")
+    print(f"\n검증 OOS: {res['n_test']}기간 ({res['span'][0]}~{res['span'][1]})  "
+          f"embargo={res['embargo']}구간")
     print(f"{'':12}{'누적':>9}{'CAGR':>9}{'샤프':>7}{'MDD':>8}")
     for key, label in (("ml", "ML(LGBM)"), ("mom", "모멘텀"), ("mkt", "시장(평균)")):
         m = res[key]
         print(f"{label:12}{m['total']*100:>8.1f}%{m['cagr']*100:>8.1f}%{m['sharpe']:>7.2f}{m['mdd']*100:>7.1f}%")
     print("\n→ ML이 모멘텀·시장보다 샤프/수익이 높아야 '알파'가 있는 것입니다.")
+
+    # 누수 전·후 비교: embargo>0(보정) vs embargo=0(누수 포함)
+    if not args.no_compare and args.embargo > 0:
+        leak = run_ml_wf(ds, top_n=args.top_n, embargo=0)
+        if "error" not in leak:
+            lm, cm = leak["ml"], res["ml"]
+            print("\n----- 정보 누수 영향 (ML 기준) -----")
+            print(f"{'':16}{'샤프':>8}{'누적':>10}")
+            print(f"{'누수 포함(e=0)':16}{lm['sharpe']:>8.2f}{lm['total']*100:>9.1f}%")
+            print(f"{'보정(e=%d)' % args.embargo:16}{cm['sharpe']:>8.2f}{cm['total']*100:>9.1f}%")
+            print(f"{'차이(부풀림)':16}{lm['sharpe']-cm['sharpe']:>+8.2f}"
+                  f"{(lm['total']-cm['total'])*100:>+9.1f}%p")
+            print("  → 양수가 클수록 누수가 OOS 성과를 낙관적으로 부풀린 것입니다.")
+
     print("\n피처 중요도(상위):")
     for name, val in res["importance"][:8]:
         print(f"   {name:<16}{val}")
