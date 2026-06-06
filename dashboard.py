@@ -1,7 +1,8 @@
 """ASAB 데이터 수집 대시보드 (Streamlit).
 
 수집 현황 모니터링 + 수집 데이터 점검에 집중.
-**DB만 읽으므로 KIS API를 호출하지 않음 → 수집기와의 API 충돌(rate limit) 없음.**
+**기본적으로 DB만 읽어 KIS API를 호출하지 않음 → 수집기와의 API 충돌(rate limit) 없음.**
+(예외: 🧾 거래저널 탭의 '잔고 새로고침' 버튼만 클릭 시 1회 KIS 잔고 조회)
 
 백테스트/스크리너/계좌는 데이터·전략이 준비되는 매매 단계에서 다시 붙인다.
 지금은 CLI로 사용:  python -m src.backtest / src.screener / src.walkforward
@@ -13,8 +14,12 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
+from datetime import datetime
+
 from src.data.store import DataStore
 from src.kis.config import load_config
+from src.kis.client import KISClient
+from src.kis.domestic import DomesticStock
 from src.features import build_dataset
 from src.ml import run_ml_wf
 
@@ -87,6 +92,23 @@ def journal_data() -> dict:
         snaps = [dict(r) for r in store.account_snapshots(1000)]
     return {"signals": signals, "orders": orders,
             "positions": positions, "snaps": snaps}
+
+
+def fetch_balance_snapshot() -> dict:
+    """KIS 잔고를 1회 조회해 account_snapshot 으로 저장하고 잔고를 반환한다.
+    버튼 클릭 시에만 호출(평소 대시보드는 API 미호출). 휴장일에도 동작(조회).
+    """
+    dom = DomesticStock(KISClient(get_config()))
+    bal = dom.balance()
+    hk = sum(h["eval_amt"] for h in bal["holdings"])
+    uk = sum(h["pnl"] for h in bal["holdings"])
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open_store() as store:
+        store.save_account_snapshot(ts, {
+            "cash_krw": bal["cash"], "holdings_krw": hk,
+            "total_krw": bal["cash"] + hk, "realized_krw": 0.0,
+            "unrealized_krw": uk, "fx_rate": 1.0})
+    return bal
 
 
 # --- 수집 현황 모니터 (실시간) ---------------------------------------------
@@ -240,6 +262,28 @@ with tab_model:
 with tab_journal:
     st.subheader("🧾 거래 저널 (라이브 매매 기록)")
     st.caption("run_bot(screener_rotation)이 남긴 신호·주문·포지션·계좌 기록. DB만 읽음.")
+
+    # 잔고 새로고침: 버튼 클릭 시에만 KIS 조회(휴장일에도 동작) → 스냅샷 저장
+    bc1, bc2 = st.columns([1, 3])
+    if bc1.button("🔄 잔고 새로고침 (KIS 조회)"):
+        try:
+            with st.spinner("KIS 잔고 조회 중..."):
+                bal = fetch_balance_snapshot()
+            st.session_state["live_balance"] = bal
+            journal_data.clear()  # 캐시 무효화 → 카드/차트 갱신
+            bc2.success(f"갱신 완료 · 예수금 ₩{bal['cash']:,} · 보유 {len(bal['holdings'])}종목")
+        except Exception as e:  # noqa: BLE001 (API/네트워크 등 모든 실패 표시)
+            bc2.error(f"잔고 조회 실패: {e}")
+
+    lb = st.session_state.get("live_balance")
+    if lb and lb["holdings"]:
+        st.markdown("**실시간 보유(방금 조회)**")
+        hdf = pd.DataFrame(lb["holdings"])[["symbol", "name", "qty", "avg_price", "eval_amt", "pnl"]]
+        hdf.columns = ["코드", "종목", "수량", "평균매입가", "평가금액", "평가손익"]
+        st.dataframe(hdf.style.format(
+            {"평균매입가": "{:,.0f}", "평가금액": "{:,.0f}", "평가손익": "{:+,.0f}"}),
+            width="stretch", hide_index=True)
+
     j = journal_data()
     snaps, positions, orders, signals = j["snaps"], j["positions"], j["orders"], j["signals"]
 
