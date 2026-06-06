@@ -57,6 +57,7 @@ def run_backtest(
     hold_days: int = 20,
     cost_bps: float = 25.0,
     slippage_bps: float = 10.0,
+    stop_loss_pct: float = 0.0,
     require_financials: bool = True,
     regime_filter: bool = False,
     regime_ma: int = 200,
@@ -229,18 +230,42 @@ def run_backtest(
         bench_entry = close_by.get(BENCHMARK_SYMBOL, {}).get(t) if BENCHMARK_SYMBOL in series else None
         bench_last = bench_entry
 
+        # 손절 사용 시: 종목별 자본을 따로 추적(손절분은 현금화). stop_loss_pct=0 이면
+        # 기존(일별 동일비중 리밸런싱) 경로를 그대로 사용해 과거 검증치와 동일하게 유지.
+        use_stop = stop_loss_pct > 0 and picks
+        if use_stop:
+            stop_lvl = 1.0 - stop_loss_pct / 100.0
+            name_eq = {s: 1.0 for s in picks}   # 진입가 대비 종목 자본배수
+            active = {s: True for s in picks}
+            base_port = prev_port               # 진입 시점 포트폴리오 가치
+
         for k in range(i + 1, j_end + 1):
             d = dates[k]
-            # 전략: 동일비중 종목들의 일별 수익률 평균
-            rets = []
-            for s in picks:
-                c0 = last_close.get(s)
-                c1 = close_by[s].get(d)
-                if c0 and c1:
-                    rets.append(c1 / c0 - 1)
-                    last_close[s] = c1
-            if rets:
-                prev_port *= (1 + sum(rets) / len(rets))
+            if use_stop:
+                # 종목별 자본 갱신 + 손절 청산(이후 현금=배수 고정)
+                for s in picks:
+                    if not active[s]:
+                        continue
+                    c0 = last_close.get(s)
+                    c1 = close_by[s].get(d)
+                    if c0 and c1:
+                        name_eq[s] *= (c1 / c0)
+                        last_close[s] = c1
+                        if name_eq[s] <= stop_lvl:   # 손절 발동 → 현금화(배수 고정)
+                            active[s] = False
+                # 포트폴리오 = 동일비중(진입 1/N) × 종목 자본배수 평균 (손절분 freeze)
+                prev_port = base_port * (sum(name_eq.values()) / len(picks))
+            else:
+                # 전략: 동일비중 종목들의 일별 수익률 평균
+                rets = []
+                for s in picks:
+                    c0 = last_close.get(s)
+                    c1 = close_by[s].get(d)
+                    if c0 and c1:
+                        rets.append(c1 / c0 - 1)
+                        last_close[s] = c1
+                if rets:
+                    prev_port *= (1 + sum(rets) / len(rets))
             # 벤치마크
             if bench_last:
                 bc = close_by.get(BENCHMARK_SYMBOL, {}).get(d)
@@ -267,7 +292,7 @@ def run_backtest(
         "holdings_log": holdings_log,
         "params": {
             "top_n": top_n, "hold_days": hold_days, "cost_bps": cost_bps,
-            "slippage_bps": slippage_bps,
+            "slippage_bps": slippage_bps, "stop_loss_pct": stop_loss_pct,
             "regime_filter": regime_filter, "regime_ma": regime_ma,
         },
         "pool_size": len(pool),
@@ -317,6 +342,8 @@ def main() -> None:
     ap.add_argument("--cost-bps", type=float, default=25.0, help="수수료·세금(bps)")
     ap.add_argument("--slippage-bps", type=float, default=10.0,
                     help="슬리피지(bps, 유동성 낮을수록 자동 증폭). 0=비활성")
+    ap.add_argument("--stop-loss-pct", type=float, default=0.0,
+                    help="보유중 손절 %% (예: 8). 0=비활성. 켜면 손절분은 현금화")
     ap.add_argument("--include-etf", action="store_true")
     ap.add_argument("--regime-filter", action="store_true",
                     help="지수 이동평균 아래면 현금 보유(시장국면 필터)")
@@ -327,6 +354,7 @@ def main() -> None:
     res = run_backtest(
         store, top_n=args.top_n, hold_days=args.hold_days,
         cost_bps=args.cost_bps, slippage_bps=args.slippage_bps,
+        stop_loss_pct=args.stop_loss_pct,
         require_financials=not args.include_etf,
         regime_filter=args.regime_filter, regime_ma=args.regime_ma,
     )
@@ -339,7 +367,9 @@ def main() -> None:
     rf = "ON" if res["params"]["regime_filter"] else "OFF"
     p = res["params"]
     print(f"대상 종목 풀: {res['pool_size']}개 / 국면필터 {rf}(적용={res['regime_applied']})")
+    sl = p.get("stop_loss_pct", 0)
     print(f"거래비용   : 수수료·세금 {p['cost_bps']:.0f}bps + 슬리피지 {p['slippage_bps']:.0f}bps(유동성차등)")
+    print(f"손절       : {('%.0f%%' % sl) if sl > 0 else 'OFF'}")
     print(f"누적수익률 : {m['total_return']*100:+.1f}%  (벤치마크 {m['bench_return']*100:+.1f}%)")
     print(f"CAGR       : {m['cagr']*100:+.1f}%")
     print(f"샤프지수   : {m['sharpe']:.2f}")
