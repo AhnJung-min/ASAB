@@ -17,17 +17,35 @@ account_product_code: "01"
 
 # 자동매매 설정
 trading:
-  # 감시 종목 (국내: 6자리 종목코드 / 해외: 거래소+심볼)
+  # [sma_cross 전용] 감시 종목 (국내: 6자리 종목코드 / 해외: 거래소+심볼)
   domestic_symbols: ["005930", "000660"]   # 삼성전자, SK하이닉스
   overseas_symbols:                          # 미국 주식 예시
     - { exchange: "NAS", symbol: "AAPL" }
     - { exchange: "NAS", symbol: "TSLA" }
 
-  poll_interval_sec: 10      # 시세 확인 주기(초)
-  order_qty: 1               # 1회 주문 수량
-  max_position_per_symbol: 5 # 종목당 최대 보유 수량
+  poll_interval_sec: 10      # [sma_cross] 시세 확인 주기(초)
+  order_qty: 1               # [sma_cross] 1회 주문 수량
+  max_position_per_symbol: 5 # [sma_cross] 종목당 최대 보유 수량
 
+  # [screener_rotation 전용] 리밸런싱 파라미터
+  rebalance_interval_sec: 3600     # 리밸런스 주기(초). 일 단위면 86400
+  invest_ratio: 0.95               # 가용 현금 중 투자 비율(나머지 버퍼)
+  max_position_value_krw: 0        # 종목당 최대 매수금액(원). 0=무제한(동일비중)
+
+# 전략 선택: sma_cross(기본) | screener_rotation
 strategy:
-  name: "sma_cross"          # 단순이동평균 교차 전략
+  name: "sma_cross"          # 단순이동평균 교차 전략(기존)
   short_window: 5
   long_window: 20
+
+  # name 을 아래로 바꾸면 '검증된' 스크리너+시장국면 로테이션으로 동작:
+  # name: "screener_rotation"
+  # top_n: 5                 # 보유 종목 수(동일비중)
+  # regime_filter: true      # 지수가 N일선 아래면 현금 보유(하락장 방어)
+  # regime_ma: 200           # 시장국면 판정 이동평균(일)
+  #
+  # 실행 단계(안전 순서):
+  #   python -m src.run_bot --plan       # 타깃만 확인 (API/주문 없음)
+  #   python -m src.run_bot --once --dry-run  # 잔고 반영하되 주문 안 함
+  #   python -m src.run_bot --once       # 모의계좌에 실제(모의) 주문 1회
+  #   python -m src.run_bot              # 주기적 리밸런싱
