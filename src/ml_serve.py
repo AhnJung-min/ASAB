@@ -87,7 +87,9 @@ def predict_universe(store: DataStore, max_pool: int = 300) -> list[dict[str, An
         closes = [r["close"] for r in rows]
         values = [r["value"] for r in rows]
         volumes = [r["volume"] for r in rows]
-        f = compute_features(closes, values, volumes, ir)
+        highs = [r["high"] for r in rows]
+        lows = [r["low"] for r in rows]
+        f = compute_features(closes, values, volumes, ir, highs, lows)
         if f is None:
             continue
         X = np.array([[f[k] for k in feats]], dtype=float)
