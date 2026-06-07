@@ -15,12 +15,16 @@ class DomesticStock:
         self.paper = client.config.paper_trading
 
     # --- 시세 ---------------------------------------------------------------
-    def current_price(self, symbol: str) -> int:
-        """현재가(원) 조회. symbol: 6자리 종목코드."""
+    def current_price(self, symbol: str, market: str = "J") -> int:
+        """현재가(원) 조회. symbol: 6자리 종목코드.
+
+        market(FID_COND_MRKT_DIV_CODE): J=KRX(거래소) / NX=넥스트레이드(NXT)
+        / UN=통합(KRX+NXT). NXT 연장시간(프리·애프터마켓) 변동까지 보려면 UN.
+        """
         data = self.c.get(
             "/uapi/domestic-stock/v1/quotations/inquire-price",
             tr_id="FHKST01010100",  # 시세는 모의/실전 동일
-            params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": symbol},
+            params={"FID_COND_MRKT_DIV_CODE": market, "FID_INPUT_ISCD": symbol},
         )
         return int(data["output"]["stck_prpr"])
 

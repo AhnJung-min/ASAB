@@ -131,6 +131,7 @@ def run_rotation(once: bool = False, plan: bool = False, dry_run: bool = False) 
     regime_filter = bool(s.get("regime_filter", True))
     regime_ma = int(s.get("regime_ma", 200))
     risk_interval = int(t.get("risk_check_interval_sec", 60))   # 리스크(손절) 감시 주기
+    quote_market = str(t.get("quote_market", "UN")).upper()     # 시세 시장: UN(통합)/J(KRX)/NX
     invest_ratio = float(t.get("invest_ratio", 0.95))           # 가용현금 중 투자 비율
     max_value = int(t.get("max_position_value_krw", 0))         # 종목당 최대 매수금액(0=무제한)
     order_type = str(t.get("order_type", "limit")).lower()      # limit(지정가) | market(시장가)
@@ -150,7 +151,8 @@ def run_rotation(once: bool = False, plan: bool = False, dry_run: bool = False) 
     risk_txt = (f"손절{stop_loss}% 트레일링{trailing}% 익절{take_profit}%"
                 if risk_on else "리스크청산 OFF")
     log(f"로테이션 봇 시작 [{mode}] top{top_n} · 국면필터={regime_filter}(MA{regime_ma})")
-    log(f"  주문={order_type}(매수상한{limit_band}bps) · {risk_txt}")
+    mkt_txt = {"UN": "통합(KRX+NXT)", "NX": "NXT", "J": "KRX"}.get(quote_market, quote_market)
+    log(f"  주문={order_type}(매수상한{limit_band}bps) · 시세={mkt_txt} · {risk_txt}")
 
     store = DataStore()
     dom: DomesticStock | None = None
@@ -223,7 +225,7 @@ def run_rotation(once: bool = False, plan: bool = False, dry_run: bool = False) 
                 store.delete_position(sym)
         for sym, h in held.items():
             try:
-                cur = dom.current_price(sym)
+                cur = dom.current_price(sym, quote_market)   # 통합시세=NXT 연장시간 반영
             except KISApiError:
                 continue
             entry = float(h["avg_price"]) or cur
@@ -266,7 +268,7 @@ def run_rotation(once: bool = False, plan: bool = False, dry_run: bool = False) 
             if sym in target_syms:
                 continue
             try:
-                ref = dom.current_price(sym)
+                ref = dom.current_price(sym, quote_market)
             except KISApiError:
                 ref = float(h["avg_price"])
             journal([{"symbol": sym, "name": h["name"]}], "sell", asof, "타깃 이탈/청산")
@@ -280,7 +282,7 @@ def run_rotation(once: bool = False, plan: bool = False, dry_run: bool = False) 
         for p in buys:
             sym = p["symbol"]
             try:
-                price = dom.current_price(sym)
+                price = dom.current_price(sym, quote_market)
             except KISApiError as e:
                 journal([p], "skip", asof, f"시세조회 실패: {e}")
                 log(f"  매수 보류 {p['name']}({sym}): 시세 오류 {e}")
