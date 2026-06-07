@@ -141,6 +141,13 @@ CREATE TABLE IF NOT EXISTS trade_stats (
     value  REAL,
     PRIMARY KEY (month, metric, field)
 );
+-- 섹터별 월별 수출 시계열(관세청 HS CSV → 섹터 합산) — C(섹터 틸트) 검증용
+CREATE TABLE IF NOT EXISTS export_history (
+    month  TEXT NOT NULL,    -- 'YYYY-MM'
+    sector TEXT NOT NULL,    -- 반도체|자동차|...
+    export_kusd REAL,        -- 수출 금액(천불)
+    PRIMARY KEY (month, sector)
+);
 -- 보유 포지션 상태(트레일링 고점 영속화 — --once 재시작에도 고점 유지)
 CREATE TABLE IF NOT EXISTS live_position (
     symbol      TEXT PRIMARY KEY,
@@ -397,6 +404,18 @@ class DataStore:
     def get_trade_stats(self) -> list[sqlite3.Row]:
         return self.conn.execute(
             "SELECT month,metric,field,value FROM trade_stats ORDER BY month").fetchall()
+
+    def save_export_history(self, rows: list[dict[str, Any]]) -> int:
+        data = [(r["month"], r["sector"], float(r["export_kusd"])) for r in rows]
+        self.conn.executemany(
+            "INSERT INTO export_history (month,sector,export_kusd) VALUES (?,?,?) "
+            "ON CONFLICT(month,sector) DO UPDATE SET export_kusd=excluded.export_kusd", data)
+        self.conn.commit()
+        return len(data)
+
+    def get_export_history(self) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT month,sector,export_kusd FROM export_history ORDER BY month,sector").fetchall()
 
     # --- 라이브 거래 저널 ---------------------------------------------------
     def add_live_signals(self, ts: str, source: str, asof: str | None,
