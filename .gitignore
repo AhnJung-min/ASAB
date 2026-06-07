@@ -15,6 +15,7 @@ venv/
 data/*.db
 data/*.db-wal
 data/*.db-shm
+data/*.pkl
 .token_cache/
 
 # Claude 로컬 설정 (개인 환경, 추적 제외)
