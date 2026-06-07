@@ -28,6 +28,14 @@ def log(msg: str) -> None:
     print(f"[{datetime.now():%H:%M:%S}] {msg}", flush=True)
 
 
+def _months_to_update(ld: str | None, default_months: int) -> int:
+    """증분 업데이트 시 종목별 필요한 백필 개월수. 신규 종목은 전체(default)."""
+    if not ld:
+        return default_months
+    gap_days = (datetime.now() - datetime.strptime(ld, "%Y%m%d")).days
+    return max(1, gap_days // 31 + 2)  # 빠진 구간 + 2개월 여유(upsert라 중복 안전)
+
+
 def backfill_daily(md: MarketData, store: DataStore, symbol: str, months: int) -> int:
     """월 단위로 거슬러 올라가며 일봉을 채운다. 한 호출당 ~100영업일."""
     end = datetime.now()
@@ -74,7 +82,7 @@ def _build_universe(md: MarketData, store: DataStore, source: str, top: int,
 
 
 def run(source: str, top: int, months: int, limit: int | None,
-        skip_existing: bool, with_extras: bool) -> None:
+        skip_existing: bool, with_extras: bool, update: bool = False) -> None:
     cfg = load_config()
     client = KISClient(cfg)
     md = MarketData(client)
@@ -85,7 +93,8 @@ def run(source: str, top: int, months: int, limit: int | None,
     if not universe:
         store.close()
         return
-    log(f"  대상 {len(universe)}종목 · 일봉 {months}개월 백필 시작")
+    mode_txt = "증분 업데이트(최근 빠진 구간만)" if update else f"{months}개월 백필"
+    log(f"  대상 {len(universe)}종목 · 일봉 {mode_txt} 시작")
 
     # 스킵 기준: '최신 일자까지 이미 받았으면' 건너뜀(재개용).
     # (행수 기준은 최근상장주처럼 히스토리가 짧은 종목을 영원히 재수집하는 버그가 있었음)
@@ -95,12 +104,12 @@ def run(source: str, top: int, months: int, limit: int | None,
     done = 0
     for i, item in enumerate(universe, 1):
         sym, name = item["symbol"], item["name"]
-        if skip_existing:
-            ld = store.latest_date(sym)
-            if ld and ld >= cutoff:  # 이미 최근까지 받음 → 건너뜀
-                continue
+        ld = store.latest_date(sym)
+        if skip_existing and not update and ld and ld >= cutoff:  # 이미 최근까지 받음 → 건너뜀
+            continue
+        eff_months = _months_to_update(ld, months) if update else months
         try:
-            n_daily = backfill_daily(md, store, sym, months)
+            n_daily = backfill_daily(md, store, sym, eff_months)
             extra = ""
             if with_extras:
                 inv = md.investor_flow(sym)
@@ -140,6 +149,8 @@ def main() -> None:
     ap.add_argument("--top", type=int, default=30, help="[volume] 유니버스 종목 수")
     ap.add_argument("--months", type=int, default=120, help="일봉 백필 개월 수 (기본 10년)")
     ap.add_argument("--limit", type=int, default=None, help="[master] 처리 종목 수 제한")
+    ap.add_argument("--update", action="store_true",
+                    help="증분: 이미 받은 종목의 최근 빠진 구간만 빠르게 채움(일일/주기 갱신용)")
     ap.add_argument("--skip-existing", action="store_true",
                     help="이미 충분한 일봉이 있는 종목은 건너뜀 (재개용)")
     ap.add_argument("--with-extras", action="store_true",
@@ -151,7 +162,7 @@ def main() -> None:
         show_stats()
     else:
         run(args.source, args.top, args.months, args.limit,
-            args.skip_existing, args.with_extras)
+            args.skip_existing, args.with_extras, args.update)
 
 
 if __name__ == "__main__":
