@@ -182,6 +182,18 @@ def trade_stats_df() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+@st.cache_data(ttl=120)
+def export_hist_pivot() -> pd.DataFrame:
+    """섹터별 월별 수출액 시계열(억$). index='YYYY-MM', columns=섹터."""
+    with open_store() as store:
+        rows = [dict(r) for r in store.get_export_history()]
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    piv = df.pivot(index="month", columns="sector", values="export_kusd").sort_index()
+    return piv / 100_000.0  # 천불 → 억$
+
+
 @st.cache_data(ttl=60)
 def analytics_overview() -> dict:
     """1군 분석 데이터(수급) 적재 현황 + 보유 종목 목록."""
@@ -491,62 +503,76 @@ with tab_journal:
             st.caption("신호 기록 없음.")
 
 
-# --- 거시(수출입동향) 탭 ---------------------------------------------------
+# --- 거시(수출 월별 추이/비교) 탭 ------------------------------------------
 with tab_macro:
-    st.subheader("🌐 수출입동향 (MOTIE 월간 거시지표)")
-    st.caption("`python -m src.trade_stats <PDF> --save` 로 매달 적재. 달이 쌓일수록 추이가 채워집니다.")
-    tdf = trade_stats_df()
-    if tdf.empty:
-        st.info("아직 적재된 수출입동향이 없습니다.\n\n"
-                "PDF를 받으면: `python -m src.trade_stats \"2026년 4월 수출입동향.pdf\" --save`")
+    st.subheader("🌐 수출 월별 추이 · 비교")
+    piv = export_hist_pivot()
+    if piv.empty:
+        st.info("수출 월별 시계열이 없습니다.\n\n"
+                "`python -m src.trade_history \"수출입 실적(품목별).csv\" --save` 로 적재하세요.")
     else:
-        months = sorted(tdf["month"].unique())
-        latest = months[-1]
+        months = list(piv.index)              # 'YYYY-MM' 오름차순
+        years = sorted({m[:4] for m in months}, reverse=True)
 
-        def _v(metric, field, month=latest):
-            r = tdf[(tdf.metric == metric) & (tdf.field == field) & (tdf.month == month)]
-            return float(r["value"].iloc[0]) if len(r) else None
+        def _prev_year(m: str) -> str:
+            return f"{int(m[:4]) - 1}{m[4:]}"
 
-        st.markdown(f"**기준월: {latest}**  (적재 {len(months)}개월)")
-        c = st.columns(3)
-        c[0].metric("총수출", f"{_v('export','usd_bil') or 0:,.1f}억$",
-                    f"{_v('export','yoy') or 0:+.1f}%")
-        c[1].metric("총수입", f"{_v('import','usd_bil') or 0:,.1f}억$",
-                    f"{_v('import','yoy') or 0:+.1f}%")
-        c[2].metric("무역수지", f"{_v('balance','usd_bil') or 0:+,.1f}억$")
+        mode = st.radio("보기 모드", ["📅 단월 보기", "🔀 2개월 비교"], horizontal=True)
 
-        # 품목별 최신 YoY (수혜/역풍 한눈에)
-        skip = {"export", "import", "balance", "전체"}
-        item_rows = tdf[(tdf.field == "yoy") & (tdf.month == latest)
-                        & (~tdf.metric.isin(skip)) & (~tdf.metric.str.startswith("mem_"))]
-        if not item_rows.empty:
-            bar = item_rows.set_index("metric")["value"].sort_values(ascending=False)
-            st.markdown("**품목별 수출 증감률(YoY %)** — 🟢수혜 / 🔴역풍")
-            st.bar_chart(bar, color="#4C9BE8")
+        if mode == "📅 단월 보기":
+            cc = st.columns([1, 1, 3])
+            y = cc[0].selectbox("년도", years)
+            mons = [m for m in months if m.startswith(y)]
+            m = cc[1].selectbox("월", [f"{int(x[5:7])}월" for x in mons],
+                                index=len(mons) - 1)
+            sel = f"{y}-{int(m[:-1]):02d}"
+            row = piv.loc[sel].sort_values(ascending=False)
+            st.metric(f"{sel} 선택 섹터 수출 합계", f"{row.sum():,.0f}억$")
+            st.markdown("**섹터별 수출액 (억$)**")
+            st.bar_chart(row, color=UP_RED)
+            prev = _prev_year(sel)
+            if prev in piv.index:
+                yoy = ((piv.loc[sel] / piv.loc[prev] - 1) * 100).sort_values(ascending=False)
+                st.markdown(f"**전년동월({prev}) 대비 증감률 (%)**")
+                st.bar_chart(yoy, color=TOSS_BLUE)
+            else:
+                st.caption(f"전년동월({prev}) 데이터가 없어 YoY 생략.")
 
-        # 품목별 수출액 추이(달이 쌓이면 라인이 길어짐)
-        amt = tdf[(tdf.field == "usd_bil") & (~tdf.metric.isin({"export","import","balance"}))
-                  & (~tdf.metric.str.startswith("mem_")) & (tdf.metric != "전체")]
-        if not amt.empty and len(months) >= 2:
-            pivot = amt.pivot_table(index="month", columns="metric", values="value")
-            st.markdown("**품목별 수출액 추이(억$)**")
-            st.line_chart(pivot)
-        elif not amt.empty:
-            st.caption("※ 품목별 추이 차트는 2개월 이상 적재되면 표시됩니다(현재 1개월).")
+        else:  # 2개월 비교
+            cc = st.columns(2)
+            mA = cc[0].selectbox("월 A (기준)", months,
+                                 index=max(0, len(months) - 13))
+            mB = cc[1].selectbox("월 B (비교)", months, index=len(months) - 1)
+            cmp = pd.DataFrame({mA: piv.loc[mA], mB: piv.loc[mB]})
+            st.markdown("**섹터별 수출액 비교 (억$)**")
+            st.bar_chart(cmp, color=[TOSS_BLUE, UP_RED])
+            diff = ((piv.loc[mB] / piv.loc[mA] - 1) * 100)
+            dd = diff.reset_index()
+            dd.columns = ["섹터", "증감%"]
+            dd["A(억$)"] = piv.loc[mA].values
+            dd["B(억$)"] = piv.loc[mB].values
+            dd = dd[["섹터", "A(억$)", "B(억$)", "증감%"]].sort_values("증감%", ascending=False)
+            st.markdown(f"**{mA} → {mB} 섹터별 증감**")
+            st.dataframe(dd.style.format({"A(억$)": "{:,.0f}", "B(억$)": "{:,.0f}",
+                                          "증감%": "{:+.1f}"}),
+                         width="stretch", hide_index=True)
 
-        # 메모리 고정가
-        mem = tdf[(tdf.month == latest) & (tdf.metric.str.startswith("mem_"))
-                  & (tdf.field == "price_usd")]
-        if not mem.empty:
-            mc = st.columns(len(mem))
-            for col, (_, row) in zip(mc, mem.iterrows()):
-                name = row["metric"].replace("mem_", "")
-                yoy = _v(row["metric"], "yoy")
-                col.metric(f"{name} 고정가", f"{row['value']}$",
-                           f"{yoy:+.0f}%" if yoy is not None else None)
+        # 최신 MOTIE 요약(있으면) — 총수출/수입/수지
+        tdf = trade_stats_df()
+        if not tdf.empty:
+            lm = sorted(tdf["month"].unique())[-1]
+            def _v(metric, field):
+                r = tdf[(tdf.metric == metric) & (tdf.field == field) & (tdf.month == lm)]
+                return float(r["value"].iloc[0]) if len(r) else None
+            with st.expander(f"📄 최신 MOTIE 요약 ({lm})"):
+                c = st.columns(3)
+                c[0].metric("총수출", f"{_v('export','usd_bil') or 0:,.1f}억$",
+                            f"{_v('export','yoy') or 0:+.1f}%")
+                c[1].metric("총수입", f"{_v('import','usd_bil') or 0:,.1f}억$",
+                            f"{_v('import','yoy') or 0:+.1f}%")
+                c[2].metric("무역수지", f"{_v('balance','usd_bil') or 0:+,.1f}억$")
 
-        st.caption("⚠️ 수출동향은 1개월 시차의 후행지표 — 매매 직결이 아니라 '거시 확인·섹터 참고'용. "
-                   "신호화(C)는 여러 달 누적 후 백테스트 검증 필요.")
+        st.caption("※ 섹터 수출은 관세청 HS 기준 합산(억$). 거시 참고용 — 매매 신호 아님(C 검증 탈락).")
 
 
 with tab_data:
