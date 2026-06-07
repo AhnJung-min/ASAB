@@ -25,46 +25,86 @@ from src.ml import run_ml_wf
 
 st.set_page_config(page_title="ASAB", page_icon="📈", layout="wide")
 
-# --- 토스증권풍 스타일 (Pretendard 폰트 · 카드형 · 여백) ---------------------
-st.markdown("""
+# --- 토스증권 웹풍 다크 스타일 ---------------------------------------------
+BG, CARD, BORDER, INK, GRAY = "#17171C", "#1E1F25", "#2A2C33", "#E5E8EB", "#8B95A1"
+TOSS_BLUE, UP_RED, DOWN_BLUE = "#3182F6", "#F04452", "#4D7EFF"
+
+st.markdown(f"""
 <style>
 @import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.min.css');
-html, body, [class*="css"], button, input { font-family: 'Pretendard', -apple-system, sans-serif; }
-#MainMenu, footer, header [data-testid="stToolbar"] { visibility: hidden; }
-.block-container { padding-top: 2.2rem; padding-bottom: 3rem; max-width: 1180px; }
-/* metric → 토스풍 카드 */
-div[data-testid="stMetric"] {
-    background: #F9FAFB; border: 1px solid #EEF1F4; border-radius: 16px;
-    padding: 16px 18px; box-shadow: 0 1px 2px rgba(0,0,0,0.03);
-}
-div[data-testid="stMetricLabel"] p { color: #8B95A1; font-size: 0.82rem; font-weight: 600; }
-div[data-testid="stMetricValue"] { font-size: 1.55rem; font-weight: 700; color: #191F28; }
-/* 탭 → 깔끔한 라인 */
-.stTabs [data-baseweb="tab-list"] { gap: 4px; border-bottom: 1px solid #EEF1F4; }
-.stTabs [data-baseweb="tab"] { font-weight: 600; color: #8B95A1; padding: 10px 14px; }
-.stTabs [aria-selected="true"] { color: #191F28; }
-/* 표·버튼 둥글게 */
-div[data-testid="stDataFrame"] { border-radius: 12px; overflow: hidden; }
-.stButton button { border-radius: 12px; font-weight: 600; }
-section[data-testid="stSidebar"] { background: #F9FAFB; border-right: 1px solid #EEF1F4; }
-hr { margin: 1rem 0; border-color: #EEF1F4; }
+html, body, [class*="css"], button, input {{ font-family: 'Pretendard', -apple-system, sans-serif; }}
+#MainMenu, footer, header [data-testid="stToolbar"] {{ visibility: hidden; }}
+.block-container {{ padding-top: 2rem; padding-bottom: 3rem; max-width: 1240px; }}
+div[data-testid="stMetric"] {{
+    background: {CARD}; border: 1px solid {BORDER}; border-radius: 16px; padding: 14px 18px;
+}}
+div[data-testid="stMetricLabel"] p {{ color: {GRAY}; font-size: 0.8rem; font-weight: 600; }}
+div[data-testid="stMetricValue"] {{ font-size: 1.45rem; font-weight: 700; color: {INK}; }}
+.stTabs [data-baseweb="tab-list"] {{ gap: 2px; border-bottom: 1px solid {BORDER}; }}
+.stTabs [data-baseweb="tab"] {{ font-weight: 600; color: {GRAY}; padding: 10px 16px; }}
+.stTabs [aria-selected="true"] {{ color: {INK}; }}
+div[data-testid="stDataFrame"] {{ border-radius: 12px; overflow: hidden; }}
+.stButton button {{ border-radius: 12px; font-weight: 600; border: 1px solid {BORDER}; }}
+section[data-testid="stSidebar"] {{ background: {CARD}; border-right: 1px solid {BORDER}; }}
+hr {{ margin: 0.8rem 0; border-color: {BORDER}; }}
 </style>
 """, unsafe_allow_html=True)
 
-# 한국식 등락 색: 상승=빨강 / 하락=파랑 / 보합=회색
-TOSS_BLUE, UP_RED, DOWN_BLUE, INK, GRAY = "#3182F6", "#F04452", "#3182F6", "#191F28", "#8B95A1"
-
 
 def kcolor(v: float) -> str:
+    """한국식 등락 색: 상승=빨강 / 하락=파랑 / 보합=회색."""
     return UP_RED if v > 0 else (DOWN_BLUE if v < 0 else GRAY)
 
 
 def hero_card(label: str, value: str, sub_html: str = "") -> str:
-    return (f"<div style='background:#fff;border:1px solid #EEF1F4;border-radius:20px;"
-            f"padding:22px 24px;box-shadow:0 1px 3px rgba(0,0,0,.04);'>"
+    return (f"<div style='background:{CARD};border:1px solid {BORDER};border-radius:20px;"
+            f"padding:20px 24px'>"
             f"<div style='color:{GRAY};font-size:.85rem;font-weight:600;margin-bottom:6px'>{label}</div>"
             f"<div style='color:{INK};font-size:2.0rem;font-weight:800;letter-spacing:-.5px'>{value}</div>"
             f"<div style='margin-top:6px;font-size:.95rem;font-weight:600'>{sub_html}</div></div>")
+
+
+def market_status() -> str:
+    """국내 장 상태 배지(KST 평일 09:00~15:30 기준 근사)."""
+    from datetime import datetime
+    now = datetime.now()
+    is_open = now.weekday() < 5 and (9 * 60) <= (now.hour * 60 + now.minute) < (15 * 60 + 30)
+    dot, txt = ("#F04452", "국내 장 열림") if is_open else ("#6B7684", "국내 장 닫힘")
+    return (f"<span style='display:inline-flex;align-items:center;gap:6px;color:{GRAY};font-size:.85rem'>"
+            f"<span style='width:8px;height:8px;border-radius:50%;background:{dot};display:inline-block'></span>"
+            f"{txt}</span>")
+
+
+def rank_row(rank: int, name: str, code: str, score: float, score_max: float) -> str:
+    """토스풍 순위 행: 순위 · 종목 · 점수 + 점수 바."""
+    w = int(min(max(score / score_max, 0), 1) * 100) if score_max else 0
+    return (f"<div style='display:flex;align-items:center;gap:12px;padding:11px 14px;"
+            f"border-bottom:1px solid {BORDER}'>"
+            f"<div style='width:22px;color:{GRAY};font-weight:700;text-align:center'>{rank}</div>"
+            f"<div style='flex:1;min-width:0'>"
+            f"<div style='color:{INK};font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis'>{name}</div>"
+            f"<div style='color:{GRAY};font-size:.75rem'>{code}</div></div>"
+            f"<div style='width:120px'>"
+            f"<div style='height:6px;background:{BORDER};border-radius:3px;overflow:hidden'>"
+            f"<div style='height:100%;width:{w}%;background:{TOSS_BLUE}'></div></div></div>"
+            f"<div style='width:54px;text-align:right;color:{INK};font-weight:700'>{score:.3f}</div>"
+            f"</div>")
+
+
+def holding_row(name: str, code: str, top: str, bottom: str, color: str) -> str:
+    """토스풍 보유종목 행: 종목 · (우측 평가/손익)."""
+    return (f"<div style='display:flex;align-items:center;gap:10px;padding:10px 14px;"
+            f"border-bottom:1px solid {BORDER}'>"
+            f"<div style='flex:1;min-width:0'>"
+            f"<div style='color:{INK};font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis'>{name}</div>"
+            f"<div style='color:{GRAY};font-size:.72rem'>{code}</div></div>"
+            f"<div style='text-align:right'><div style='color:{INK};font-weight:600'>{top}</div>"
+            f"<div style='color:{color};font-size:.8rem;font-weight:600'>{bottom}</div></div></div>")
+
+
+def card_wrap(inner: str) -> str:
+    return (f"<div style='background:{CARD};border:1px solid {BORDER};border-radius:16px;"
+            f"overflow:hidden'>{inner}</div>")
 
 
 @st.cache_resource
@@ -314,97 +354,106 @@ with tab_model:
                        else "⚠️ 이번 설정에선 ML이 모멘텀을 못 이김")
             st.info(f"{verdict}. (절대수익은 강세장 영향 → 상대비교가 핵심)")
 
-# --- 거래 저널 탭 ----------------------------------------------------------
+# --- 거래 탭 (토스풍 2분할: 좌=타깃순위 / 우=내 투자) -----------------------
 with tab_journal:
-    # 잔고 새로고침: 버튼 클릭 시에만 KIS 조회(휴장일에도 동작) → 스냅샷 저장
-    bc1, bc2 = st.columns([1, 3])
-    if bc1.button("🔄 잔고 새로고침 (KIS 조회)"):
+    head = st.columns([3, 1])
+    head[1].markdown(f"<div style='text-align:right;padding-top:6px'>{market_status()}</div>",
+                     unsafe_allow_html=True)
+    if head[0].button("🔄 잔고 새로고침 (KIS 조회)"):
         try:
             with st.spinner("KIS 잔고 조회 중..."):
                 bal = fetch_balance_snapshot()
             st.session_state["live_balance"] = bal
-            journal_data.clear()  # 캐시 무효화 → 카드/차트 갱신
-            bc2.success(f"갱신 완료 · 예수금 ₩{bal['cash']:,} · 보유 {len(bal['holdings'])}종목")
-        except Exception as e:  # noqa: BLE001 (API/네트워크 등 모든 실패 표시)
-            bc2.error(f"잔고 조회 실패: {e}")
-
-    lb = st.session_state.get("live_balance")
-    if lb and lb["holdings"]:
-        st.markdown("**실시간 보유(방금 조회)**")
-        hdf = pd.DataFrame(lb["holdings"])[["symbol", "name", "qty", "avg_price", "eval_amt", "pnl"]]
-        hdf.columns = ["코드", "종목", "수량", "평균매입가", "평가금액", "평가손익"]
-        st.dataframe(hdf.style.format(
-            {"평균매입가": "{:,.0f}", "평가금액": "{:,.0f}", "평가손익": "{:+,.0f}"}),
-            width="stretch", hide_index=True)
+            journal_data.clear()
+            st.toast(f"갱신 완료 · 예수금 {bal['cash']:,}원 · 보유 {len(bal['holdings'])}종목")
+        except Exception as e:  # noqa: BLE001
+            st.error(f"잔고 조회 실패: {e}")
 
     j = journal_data()
     snaps, positions, orders, signals = j["snaps"], j["positions"], j["orders"], j["signals"]
+    lb = st.session_state.get("live_balance")
 
-    if not (snaps or orders or signals or positions):
-        st.info("아직 라이브 매매 기록이 없습니다.\n\n"
-                "• 미리보기(주문 없음): `python -m src.run_bot --plan`\n"
-                "• 모의주문 1회(평일 장중): `python -m src.run_bot --once`\n\n"
-                "전략을 screener_rotation 으로 설정해야 합니다(config.yaml).")
-    else:
-        # 1) 계좌 요약(토스풍 히어로) + 자산추이
+    left, right = st.columns([1.4, 1], gap="large")
+
+    # ── 좌: 봇 타깃 순위 (저널 최신 target 신호) ──
+    with left:
+        st.markdown("<div style='font-weight:700;font-size:1.05rem;margin-bottom:8px'>🎯 봇 타깃 순위</div>",
+                    unsafe_allow_html=True)
+        targets = [s for s in signals if s.get("action") == "target"]
+        if targets:
+            latest_ts = targets[0]["ts"]            # signals는 최신순(id DESC)
+            rows = sorted([s for s in targets if s["ts"] == latest_ts],
+                          key=lambda r: (r.get("rank") or 999))
+            smax = max((r.get("score") or 0) for r in rows) or 1.0
+            body = "".join(rank_row(r.get("rank") or i + 1, r.get("name") or r["symbol"],
+                                    r["symbol"], r.get("score") or 0.0, smax)
+                           for i, r in enumerate(rows))
+            st.markdown(card_wrap(body), unsafe_allow_html=True)
+            st.caption(f"기준일 {rows[0].get('asof')} · 산출 {latest_ts}")
+        else:
+            st.markdown(card_wrap(f"<div style='padding:24px;color:{GRAY}'>타깃 기록이 없습니다. "
+                                  f"<br>`python -m src.run_bot --plan` 실행 후 표시됩니다.</div>"),
+                        unsafe_allow_html=True)
+
+    # ── 우: 내 투자 (총자산 + 보유) ──
+    with right:
+        st.markdown("<div style='font-weight:700;font-size:1.05rem;margin-bottom:8px'>내 투자</div>",
+                    unsafe_allow_html=True)
         if snaps:
             last = snaps[-1]
             pnl = last["unrealized_krw"]
             base = last["total_krw"] - pnl
             pct = (pnl / base * 100) if base else 0.0
-            sign = "+" if pnl >= 0 else ""
-            sub = (f"<span style='color:{kcolor(pnl)}'>평가손익 {sign}{pnl:,.0f}원 "
-                   f"({sign}{pct:.2f}%)</span>")
-            hc = st.columns([2, 1, 1])
-            hc[0].markdown(hero_card("총자산", f"{last['total_krw']:,.0f}원", sub),
-                           unsafe_allow_html=True)
-            hc[1].metric("현금", f"{last['cash_krw']:,.0f}원")
-            hc[2].metric("주식평가", f"{last['holdings_krw']:,.0f}원")
-            st.write("")
+            sg = "+" if pnl >= 0 else ""
+            sub = f"<span style='color:{kcolor(pnl)}'>{sg}{pnl:,.0f}원 ({sg}{pct:.2f}%)</span>"
+            st.markdown(hero_card("총자산", f"{last['total_krw']:,.0f}원", sub), unsafe_allow_html=True)
+            mc = st.columns(2)
+            mc[0].metric("현금", f"{last['cash_krw']:,.0f}원")
+            mc[1].metric("주식평가", f"{last['holdings_krw']:,.0f}원")
+        else:
+            st.markdown(hero_card("총자산", "—", "🔄 잔고 새로고침을 눌러주세요"), unsafe_allow_html=True)
+
+        st.markdown(f"<div style='color:{GRAY};font-size:.85rem;font-weight:600;margin:12px 0 4px'>보유 종목</div>",
+                    unsafe_allow_html=True)
+        if lb and lb["holdings"]:
+            body = "".join(holding_row(h["name"], h["symbol"], f"{h['eval_amt']:,}원",
+                                       ("+" if h["pnl"] >= 0 else "") + f"{h['pnl']:,}원", kcolor(h["pnl"]))
+                           for h in lb["holdings"])
+            st.markdown(card_wrap(body), unsafe_allow_html=True)
+        elif positions:
+            body = "".join(holding_row(p["name"], p["symbol"], f"{p['qty']}주", "고점 추적중", GRAY)
+                           for p in positions)
+            st.markdown(card_wrap(body), unsafe_allow_html=True)
+        else:
+            st.caption("보유 없음 (현금)")
+
+    # ── 하단: 자산추이 · 최근 활동(접이식) ──
+    st.write("")
+    if snaps:
+        with st.expander("📈 계좌 자산추이", expanded=False):
             sdf = pd.DataFrame(snaps)
             sdf["ts"] = pd.to_datetime(sdf["ts"])
             sdf = sdf.set_index("ts")
-            st.caption(f"계좌 자산추이 ({len(snaps)} 스냅샷)")
             st.line_chart(sdf[["total_krw", "cash_krw", "holdings_krw"]].rename(
                 columns={"total_krw": "총자산", "cash_krw": "현금", "holdings_krw": "주식평가"}))
 
-        # 2) 현재 포지션(트레일링 고점 추적)
-        st.subheader("📦 현재 포지션")
-        if positions:
-            pdf = pd.DataFrame(positions)
-            pdf["고점수익%"] = pdf.apply(
-                lambda r: (r["peak_price"] / r["entry_price"] - 1) * 100
-                if r["entry_price"] else 0.0, axis=1)
-            pdf = pdf[["symbol", "name", "qty", "entry_price", "peak_price", "고점수익%", "updated_ts"]]
-            pdf.columns = ["코드", "종목", "수량", "평균매입가", "보유중고점", "고점수익%", "갱신"]
-            st.dataframe(pdf.style.format(
-                {"평균매입가": "{:,.0f}", "보유중고점": "{:,.0f}", "고점수익%": "{:+.1f}"}),
-                width="stretch", hide_index=True)
-            st.caption("※ 실시간 현재가·손익은 봇(run_bot) 또는 KIS 앱에서 확인(대시보드는 API 미호출).")
-        else:
-            st.caption("보유 포지션 없음(현금).")
-
-        # 3) 최근 주문
-        st.subheader("🧾 최근 주문")
+    with st.expander("🧾 최근 주문", expanded=bool(orders)):
         if orders:
             odf = pd.DataFrame(orders)
-            side_icon = {"buy": "🟢 매수", "sell": "🔴 매도"}
-            dvsn = {"00": "지정가", "01": "시장가"}
-            odf["구분"] = odf["side"].map(side_icon).fillna(odf["side"])
-            odf["유형"] = odf["ord_dvsn"].map(dvsn).fillna(odf["ord_dvsn"])
+            odf["구분"] = odf["side"].map({"buy": "🔴 매수", "sell": "🔵 매도"}).fillna(odf["side"])
+            odf["유형"] = odf["ord_dvsn"].map({"00": "지정가", "01": "시장가"}).fillna(odf["ord_dvsn"])
             view = odf[["ts", "구분", "name", "qty", "price", "유형", "mode", "status", "msg"]]
             view.columns = ["시각", "구분", "종목", "수량", "가격", "유형", "모드", "상태", "메시지"]
-            st.dataframe(view, width="stretch", hide_index=True, height=280)
+            st.dataframe(view, width="stretch", hide_index=True, height=240)
         else:
             st.caption("주문 기록 없음.")
 
-        # 4) 최근 신호
-        st.subheader("📨 최근 신호")
+    with st.expander("📨 최근 신호"):
         if signals:
             gdf = pd.DataFrame(signals)
             view = gdf[["ts", "action", "name", "rank", "score", "reason"]]
             view.columns = ["시각", "액션", "종목", "순위", "점수", "사유"]
-            st.dataframe(view, width="stretch", hide_index=True, height=280)
+            st.dataframe(view, width="stretch", hide_index=True, height=240)
         else:
             st.caption("신호 기록 없음.")
 
