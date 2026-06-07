@@ -21,6 +21,7 @@ FEATURES = [
     "ret_5", "ret_20", "ret_60", "ret_120", "ret_60_skip5",
     "ma20_ratio", "ma60_ratio", "vol_20", "vol_60", "rsi_14",
     "rel_str_60", "liq", "vol_surge", "high_252_dist",
+    "day_pos",  # 당일 종가의 일중 위치 — ablation 검증 채택(샤프 0.90→1.02)
 ]
 
 
@@ -39,8 +40,11 @@ def _rsi(closes: list[int], n: int = 14) -> float:
     return 100 - 100 / (1 + rs)
 
 
-def compute_features(closes, values, volumes, idx_ret60) -> dict | None:
-    """as-of 피처. closes/values/volumes 는 t시점까지(과거→t) 리스트."""
+def compute_features(closes, values, volumes, idx_ret60, highs=None, lows=None) -> dict | None:
+    """as-of 피처. closes/values/volumes 는 t시점까지(과거→t) 리스트.
+
+    highs/lows 를 주면 보조지표(후보) 피처도 함께 계산한다(ablation 검증용).
+    """
     n = len(closes)
     if n < WARMUP:
         return None
@@ -67,7 +71,28 @@ def compute_features(closes, values, volumes, idx_ret60) -> dict | None:
         "vol_surge": (sum(volumes[-5:]) / 5) / max(sum(volumes[-60:]) / 60, 1),
         "high_252_dist": c[-1] / max(c[-252:]) - 1,
     }
+
+    # --- 후보 보조지표(고가/저가 필요). FEATURES 에는 아직 미포함 → ablation 으로 검증 후 채택 ---
+    if highs is not None and lows is not None and len(highs) == n and len(lows) == n:
+        px = c[-1] or 1
+        rng = highs[-1] - lows[-1]
+        lo60, hi60 = min(lows[-60:]), max(highs[-60:])
+        piv = (highs[-2] + lows[-2] + c[-2]) / 3 if n >= 2 else px
+        tv = sum(volumes[-60:])
+        vwap60 = (sum(p * v for p, v in zip(c[-60:], volumes[-60:])) / tv) if tv > 0 else px
+        feat.update({
+            "day_pos": (c[-1] - lows[-1]) / rng if rng > 0 else 0.5,   # 당일 종가의 일중 위치
+            "sup_dist": (px - lo60) / px,                              # 60일 지지선(저점) 위 여유
+            "res_dist": (hi60 - px) / px,                              # 60일 저항선(고점)까지 거리
+            "pivot_dist": (px / piv - 1) if piv else 0.0,             # 전일 피벗 대비 위치
+            "poc_dist": (px / vwap60 - 1) if vwap60 else 0.0,         # 매물대(60일 VWAP) 대비 위치
+        })
     return feat
+
+
+# 후보 보조지표(검증 통과 시 FEATURES 로 승격). day_pos 는 채택되어 FEATURES 로 이동.
+# 나머지는 단독 ablation 에서 샤프 하락(기각) — 향후 조합 재검증용으로 보존.
+CANDIDATE_FEATURES = ["sup_dist", "res_dist", "pivot_dist", "poc_dist"]
 
 
 def build_dataset(store: DataStore, hold_days: int = 20, max_pool: int = 300,
@@ -99,7 +124,8 @@ def build_dataset(store: DataStore, hold_days: int = 20, max_pool: int = 300,
     # 종목별 (날짜→인덱스), 배열
     pos_by = {s: {r["date"]: i for i, r in enumerate(rows)} for s, rows in series.items()}
     arrs = {s: ([r["close"] for r in rows], [r["value"] for r in rows],
-                [r["volume"] for r in rows], [r["date"] for r in rows])
+                [r["volume"] for r in rows], [r["date"] for r in rows],
+                [r["high"] for r in rows], [r["low"] for r in rows])
             for s, rows in series.items()}
 
     # 리밸런스 날짜 = 인덱스 거래일을 hold_days 간격으로
@@ -113,10 +139,11 @@ def build_dataset(store: DataStore, hold_days: int = 20, max_pool: int = 300,
             p = pos_by[s].get(t)
             if p is None or p < WARMUP - 1:
                 continue
-            closes, values, volumes, dates = arrs[s]
+            closes, values, volumes, dates, highs, lows = arrs[s]
             if p + hold_days >= len(closes):
                 continue  # 미래수익률(라벨) 없음
-            f = compute_features(closes[: p + 1], values[: p + 1], volumes[: p + 1], ir)
+            f = compute_features(closes[: p + 1], values[: p + 1], volumes[: p + 1], ir,
+                                 highs[: p + 1], lows[: p + 1])
             if f is None:
                 continue
             f["date"] = t
