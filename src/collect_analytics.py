@@ -34,19 +34,43 @@ def _ymd(d: datetime) -> str:
 
 
 def _page_single(fetch_save, symbol: str, start: datetime, end: datetime,
-                 step_days: int = 28) -> int:
+                 step_days: int = 28, max_empty: int = 2) -> int:
     """단일 날짜 입력 엔드포인트(한 호출 ~30일)를 날짜를 거슬러 페이징.
 
-    fetch_save(date_str) -> 저장 건수. 빈 응답이면 중단.
+    fetch_save(date_str) -> 저장 건수. 빈 응답이 max_empty 회 연속이면 중단
+    (휴장·일시적 공백 한두 번은 건너뛰고 계속).
     """
     total = 0
     cursor = end
+    empty = 0
     while cursor >= start:
         n = fetch_save(_ymd(cursor))
         if n == 0:
-            break
+            empty += 1
+            if empty > max_empty:
+                break
+        else:
+            empty = 0
         total += n
         cursor = cursor - timedelta(days=step_days)
+    return total
+
+
+def _page_range(fetch_save, start: datetime, end: datetime,
+                window_days: int = 95) -> int:
+    """기간 조회 엔드포인트(한 호출 ~100행 캡)를 윈도우로 잘라 누적.
+
+    fetch_save(start_str, end_str) -> 저장 건수. 공매도 금지기간 등 0 윈도우가
+    있어도 start 까지 계속 거슬러 올라간다(윈도우 수 적어 비용 작음).
+    """
+    total = 0
+    chunk_end = end
+    while chunk_end >= start:
+        chunk_start = max(start, chunk_end - timedelta(days=window_days))
+        total += fetch_save(_ymd(chunk_start), _ymd(chunk_end))
+        if chunk_start <= start:
+            break
+        chunk_end = chunk_start - timedelta(days=1)
     return total
 
 
@@ -54,16 +78,19 @@ def collect_symbol(ana: MarketAnalytics, store: DataStore, symbol: str,
                    start: datetime, end: datetime) -> int:
     """한 종목의 5종 데이터 수집. 개별 호출 오류는 건너뛰고 계속."""
     total = 0
-    s, e = _ymd(start), _ymd(end)
 
-    # 1) 공매도 (기간 조회)
+    # 1) 공매도 (기간 조회 — 100행 캡이라 윈도우 페이징)
     try:
-        total += store.save_short_sale(symbol, ana.short_sale(symbol, s, e))
+        total += _page_range(
+            lambda s2, e2: store.save_short_sale(symbol, ana.short_sale(symbol, s2, e2)),
+            start, end)
     except KISApiError:
         pass
-    # 2) 대차거래 (기간 조회)
+    # 2) 대차거래 (기간 조회 — 윈도우 페이징)
     try:
-        total += store.save_loan_trans(symbol, ana.loan_trans(symbol, s, e))
+        total += _page_range(
+            lambda s2, e2: store.save_loan_trans(symbol, ana.loan_trans(symbol, s2, e2)),
+            start, end)
     except KISApiError:
         pass
     # 3) 투자자매매동향 (단일일자, 페이징)
