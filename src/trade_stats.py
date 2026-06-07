@@ -74,18 +74,29 @@ def parse_pdf(path: str) -> dict[str, Any]:
     ym_str = f"{year}-{month:02d}" if year else "unknown"
 
     # --- 총괄(보도자료 본문) ---
+    # 주의: 증감률은 △(감소)·+(증가) 모두 등장, 무역수지는 적자(△)도 있음.
+    def _pct(s: str) -> float:
+        neg = "△" in s or "▲" in s or "-" in s
+        num = re.search(r"[\d.]+", s)
+        v = float(num.group()) if num else 0.0
+        return -v if neg else v
+
     out: dict[str, Any] = {"month": ym_str, "items": {}, "memory": {}}
-    m = re.search(r"수출\s*([\d,]+\.\d)억\s*달러\s*\(\+?([\d.]+)%\)", text)
+    m = re.search(r"수출\s*([\d,]+\.\d)억\s*달러\s*\(\s*([+\-△▲]?\s*[\d.]+)\s*%\)", text)
     if m:
         out["export_usd_bil"] = float(m.group(1).replace(",", ""))
-        out["export_yoy"] = float(m.group(2))
-    m = re.search(r"수입\s*([\d,]+\.\d)억\s*달러\s*\(\+?([\d.]+)%\)", text)
+        out["export_yoy"] = _pct(m.group(2))
+    m = re.search(r"수입\s*([\d,]+\.\d)억\s*달러\s*\(\s*([+\-△▲]?\s*[\d.]+)\s*%\)", text)
     if m:
         out["import_usd_bil"] = float(m.group(1).replace(",", ""))
-        out["import_yoy"] = float(m.group(2))
-    m = re.search(r"수지\s*([\d,]+\.\d)억\s*달러", text)
+        out["import_yoy"] = _pct(m.group(2))
+    m = re.search(r"수지\s*(△?▲?)\s*([\d,]+(?:\.\d)?)억\s*달러", text)
     if m:
-        out["balance_usd_bil"] = float(m.group(1).replace(",", ""))
+        v = float(m.group(2).replace(",", ""))
+        out["balance_usd_bil"] = -v if m.group(1) else v
+    # 폴백: 무역수지 = 수출 − 수입 (정수표기 등으로 못 잡았을 때 항상 정확)
+    if "balance_usd_bil" not in out and "export_usd_bil" in out and "import_usd_bil" in out:
+        out["balance_usd_bil"] = round(out["export_usd_bil"] - out["import_usd_bil"], 1)
 
     # --- 15대 품목 표: '수출액...증감률...' 블록 2개(앞 8 + 뒤 8) ---
     blocks = re.findall(r"수출액(.*?)증감률(.*?)(?:역대순위|구\s*분|$)", text, re.S)
