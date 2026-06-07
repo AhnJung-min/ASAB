@@ -564,13 +564,31 @@ with tab_macro:
             def _v(metric, field):
                 r = tdf[(tdf.metric == metric) & (tdf.field == field) & (tdf.month == lm)]
                 return float(r["value"].iloc[0]) if len(r) else None
-            with st.expander(f"📄 최신 MOTIE 요약 ({lm})"):
+            mcount = tdf["month"].nunique()
+            with st.expander(f"📄 MOTIE 월간 (총수출·수입·수지 + 메모리 고정가) · {mcount}개월"):
                 c = st.columns(3)
                 c[0].metric("총수출", f"{_v('export','usd_bil') or 0:,.1f}억$",
                             f"{_v('export','yoy') or 0:+.1f}%")
                 c[1].metric("총수입", f"{_v('import','usd_bil') or 0:,.1f}억$",
                             f"{_v('import','yoy') or 0:+.1f}%")
                 c[2].metric("무역수지", f"{_v('balance','usd_bil') or 0:+,.1f}억$")
+
+                # 2개월 이상 쌓이면 추이 차트(MOTIE PDF 매달 적재 시 자동으로 길어짐)
+                if mcount >= 2:
+                    tot = tdf[(tdf.metric.isin(["export", "import", "balance"]))
+                              & (tdf.field == "usd_bil")]
+                    tp = tot.pivot_table(index="month", columns="metric", values="value").rename(
+                        columns={"export": "총수출", "import": "총수입", "balance": "무역수지"})
+                    st.markdown("**총수출·수입·수지 추이(억$)**")
+                    st.line_chart(tp)
+                    memt = tdf[(tdf.metric.str.startswith("mem_")) & (tdf.field == "price_usd")]
+                    if not memt.empty:
+                        mp = memt.pivot_table(index="month", columns="metric", values="value")
+                        mp.columns = [c.replace("mem_", "") for c in mp.columns]
+                        st.markdown("**메모리 고정가 추이($)**")
+                        st.line_chart(mp)
+                else:
+                    st.caption("※ PDF가 2개월 이상 쌓이면 총수출/수입/수지·메모리가 추이 차트가 그려집니다.")
 
         st.caption("※ 섹터 수출은 관세청 HS 기준 합산(억$). 거시 참고용 — 매매 신호 아님(C 검증 탈락).")
 
