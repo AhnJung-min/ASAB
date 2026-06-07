@@ -130,6 +130,7 @@ def run_rotation(once: bool = False, plan: bool = False, dry_run: bool = False) 
     top_n = int(s.get("top_n", 5))
     regime_filter = bool(s.get("regime_filter", True))
     regime_ma = int(s.get("regime_ma", 200))
+    score_method = str(s.get("score_method", "screener")).lower()  # screener|ml|blend
     risk_interval = int(t.get("risk_check_interval_sec", 60))   # 리스크(손절) 감시 주기
     quote_market = str(t.get("quote_market", "UN")).upper()     # 시세 시장: UN(통합)/J(KRX)/NX
     invest_ratio = float(t.get("invest_ratio", 0.95))           # 가용현금 중 투자 비율
@@ -150,7 +151,7 @@ def run_rotation(once: bool = False, plan: bool = False, dry_run: bool = False) 
         mode = "모의투자" if cfg.paper_trading else "!! 실전투자 !!"
     risk_txt = (f"손절{stop_loss}% 트레일링{trailing}% 익절{take_profit}%"
                 if risk_on else "리스크청산 OFF")
-    log(f"로테이션 봇 시작 [{mode}] top{top_n} · 국면필터={regime_filter}(MA{regime_ma})")
+    log(f"로테이션 봇 시작 [{mode}] top{top_n} · 점수={score_method} · 국면필터={regime_filter}(MA{regime_ma})")
     mkt_txt = {"UN": "통합(KRX+NXT)", "NX": "NXT", "J": "KRX"}.get(quote_market, quote_market)
     log(f"  주문={order_type}(매수상한{limit_band}bps) · 시세={mkt_txt} · {risk_txt}")
 
@@ -247,7 +248,8 @@ def run_rotation(once: bool = False, plan: bool = False, dry_run: bool = False) 
 
     def rebalance() -> None:
         """[1층] 타깃 재계산 후 이탈 청산 + 신규 동일비중 지정가 매수."""
-        tp = target_portfolio(store, top_n=top_n, regime_filter=regime_filter, regime_ma=regime_ma)
+        tp = target_portfolio(store, top_n=top_n, regime_filter=regime_filter,
+                              regime_ma=regime_ma, method=score_method)
         asof = tp["asof"]
         state = "risk-ON(투자)" if tp["regime_on"] else "risk-OFF(현금)"
         log(f"기준일 {asof} · 시장국면 {state} · 타깃 {len(tp['picks'])}종목")
