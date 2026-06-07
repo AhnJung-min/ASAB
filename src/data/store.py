@@ -133,6 +133,14 @@ CREATE TABLE IF NOT EXISTS live_order (
     rt_cd    TEXT, msg TEXT, order_no TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_live_order_id ON live_order(id);
+-- 수출입동향(MOTIE 월간) 정형 지표 — 거시 패널/섹터 틸트용 (tidy: 월×지표×필드)
+CREATE TABLE IF NOT EXISTS trade_stats (
+    month  TEXT NOT NULL,    -- 'YYYY-MM'
+    metric TEXT NOT NULL,    -- export|import|balance|반도체|자동차|... | mem_DDR4 ...
+    field  TEXT NOT NULL,    -- usd_bil | yoy | price_usd
+    value  REAL,
+    PRIMARY KEY (month, metric, field)
+);
 -- 보유 포지션 상태(트레일링 고점 영속화 — --once 재시작에도 고점 유지)
 CREATE TABLE IF NOT EXISTS live_position (
     symbol      TEXT PRIMARY KEY,
@@ -361,6 +369,34 @@ class DataStore:
             "SELECT * FROM (SELECT * FROM account_snapshot ORDER BY ts DESC LIMIT ?) "
             "ORDER BY ts", (limit,)
         ).fetchall()
+
+    # --- 수출입동향(거시) -----------------------------------------------------
+    def save_trade_stats(self, d: dict[str, Any]) -> int:
+        """parse_pdf() 결과(dict)를 tidy 행으로 펼쳐 UPSERT. 적재 행수 반환."""
+        month = d.get("month")
+        rows: list[tuple] = []
+        for metric in ("export", "import", "balance"):
+            for field in ("usd_bil", "yoy"):
+                key = f"{metric}_{field}" if metric != "balance" else "balance_usd_bil"
+                if metric == "balance" and field == "yoy":
+                    continue
+                if key in d:
+                    rows.append((month, metric, field, float(d[key])))
+        for name, v in d.get("items", {}).items():
+            rows.append((month, name, "usd_bil", float(v["usd_bil"])))
+            rows.append((month, name, "yoy", float(v["yoy"])))
+        for name, v in d.get("memory", {}).items():
+            rows.append((month, f"mem_{name}", "price_usd", float(v["price_usd"])))
+            rows.append((month, f"mem_{name}", "yoy", float(v["yoy"])))
+        self.conn.executemany(
+            "INSERT INTO trade_stats (month,metric,field,value) VALUES (?,?,?,?) "
+            "ON CONFLICT(month,metric,field) DO UPDATE SET value=excluded.value", rows)
+        self.conn.commit()
+        return len(rows)
+
+    def get_trade_stats(self) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT month,metric,field,value FROM trade_stats ORDER BY month").fetchall()
 
     # --- 라이브 거래 저널 ---------------------------------------------------
     def add_live_signals(self, ts: str, source: str, asof: str | None,
