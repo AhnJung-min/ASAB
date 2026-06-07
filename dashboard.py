@@ -182,6 +182,39 @@ def trade_stats_df() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+@st.cache_data(ttl=60)
+def analytics_overview() -> dict:
+    """1군 분석 데이터(수급) 적재 현황 + 보유 종목 목록."""
+    with open_store() as store:
+        c = store.conn
+        out: dict = {}
+        for t in ("short_sale", "credit_balance", "program_trade", "loan_trans", "investor_flow"):
+            r = c.execute(f"SELECT COUNT(*), COUNT(DISTINCT symbol) FROM {t}").fetchone()
+            out[t] = (r[0], r[1])
+        out["symbols"] = [row[0] for row in c.execute(
+            "SELECT DISTINCT symbol FROM short_sale ORDER BY symbol")]
+    return out
+
+
+@st.cache_data(ttl=60)
+def analytics_symbol(symbol: str) -> dict:
+    """종목별 수급 시계열(투자자/공매도/신용/프로그램) DataFrame 묶음."""
+    with open_store() as store:
+        def q(sql: str) -> pd.DataFrame:
+            df = pd.read_sql_query(sql, store.conn, params=(symbol,))
+            if not df.empty:
+                df["date"] = pd.to_datetime(df["date"], format="%Y%m%d")
+                df = df.set_index("date")
+            return df
+        return {
+            "investor": q("SELECT date, foreign_qty, institution_qty FROM investor_flow "
+                          "WHERE symbol=? ORDER BY date"),
+            "short": q("SELECT date, short_vol_ratio FROM short_sale WHERE symbol=? ORDER BY date"),
+            "credit": q("SELECT date, loan_rmnd_rate FROM credit_balance WHERE symbol=? ORDER BY date"),
+            "program": q("SELECT date, prog_net_qty FROM program_trade WHERE symbol=? ORDER BY date"),
+        }
+
+
 def fetch_balance_snapshot() -> dict:
     """KIS 잔고를 1회 조회해 account_snapshot 으로 저장하고 잔고를 반환한다.
     버튼 클릭 시에만 호출(평소 대시보드는 API 미호출). 휴장일에도 동작(조회).
@@ -543,3 +576,38 @@ with tab_data:
             st.bar_chart(df[["volume"]].rename(columns={"volume": "거래량"}))
     else:
         st.info("수집된 종목이 없습니다.")
+
+    # --- 1군 분석 데이터(수급) ---
+    st.divider()
+    st.subheader("🔬 1군 분석 데이터 (수급)")
+    ov = analytics_overview()
+    albl = {"investor_flow": "투자자", "short_sale": "공매도", "credit_balance": "신용잔고",
+            "program_trade": "프로그램", "loan_trans": "대차"}
+    acols = st.columns(len(albl))
+    for col, (k, lab) in zip(acols, albl.items()):
+        n, sy = ov[k]
+        col.metric(lab, f"{n:,}행", f"{sy}종목", delta_color="off")
+
+    asyms = ov["symbols"]
+    if asyms:
+        names = dict(syms)
+        amap = {f"{names.get(s, s)} ({s})": s for s in asyms}
+        ch = st.selectbox("종목 선택 (수급)", list(amap.keys()), key="analytics_sym")
+        d = analytics_symbol(amap[ch])
+        if not d["investor"].empty:
+            st.markdown("**투자자 순매수 (주) — 외국인·기관**")
+            st.line_chart(d["investor"].rename(
+                columns={"foreign_qty": "외국인", "institution_qty": "기관"}))
+        cc = st.columns(2)
+        if not d["short"].empty:
+            cc[0].markdown("**공매도 거래량 비중(%)**")
+            cc[0].line_chart(d["short"].rename(columns={"short_vol_ratio": "공매도비중%"}))
+        if not d["credit"].empty:
+            cc[1].markdown("**신용 융자잔고 비율(%)**")
+            cc[1].line_chart(d["credit"].rename(columns={"loan_rmnd_rate": "융자잔고율%"}))
+        if not d["program"].empty:
+            st.markdown("**프로그램 순매수 수량**")
+            st.line_chart(d["program"].rename(columns={"prog_net_qty": "프로그램순매수"}))
+        st.caption("백필 진행 중이면 종목·기간이 계속 늘어납니다(5초 캐시 후 갱신).")
+    else:
+        st.caption("아직 1군 데이터가 없습니다. `python -m src.collect_analytics` 로 수집하세요.")
