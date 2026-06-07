@@ -23,7 +23,48 @@ from src.kis.domestic import DomesticStock
 from src.features import build_dataset
 from src.ml import run_ml_wf
 
-st.set_page_config(page_title="ASAB 대시보드", page_icon="📡", layout="wide")
+st.set_page_config(page_title="ASAB", page_icon="📈", layout="wide")
+
+# --- 토스증권풍 스타일 (Pretendard 폰트 · 카드형 · 여백) ---------------------
+st.markdown("""
+<style>
+@import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.min.css');
+html, body, [class*="css"], button, input { font-family: 'Pretendard', -apple-system, sans-serif; }
+#MainMenu, footer, header [data-testid="stToolbar"] { visibility: hidden; }
+.block-container { padding-top: 2.2rem; padding-bottom: 3rem; max-width: 1180px; }
+/* metric → 토스풍 카드 */
+div[data-testid="stMetric"] {
+    background: #F9FAFB; border: 1px solid #EEF1F4; border-radius: 16px;
+    padding: 16px 18px; box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+}
+div[data-testid="stMetricLabel"] p { color: #8B95A1; font-size: 0.82rem; font-weight: 600; }
+div[data-testid="stMetricValue"] { font-size: 1.55rem; font-weight: 700; color: #191F28; }
+/* 탭 → 깔끔한 라인 */
+.stTabs [data-baseweb="tab-list"] { gap: 4px; border-bottom: 1px solid #EEF1F4; }
+.stTabs [data-baseweb="tab"] { font-weight: 600; color: #8B95A1; padding: 10px 14px; }
+.stTabs [aria-selected="true"] { color: #191F28; }
+/* 표·버튼 둥글게 */
+div[data-testid="stDataFrame"] { border-radius: 12px; overflow: hidden; }
+.stButton button { border-radius: 12px; font-weight: 600; }
+section[data-testid="stSidebar"] { background: #F9FAFB; border-right: 1px solid #EEF1F4; }
+hr { margin: 1rem 0; border-color: #EEF1F4; }
+</style>
+""", unsafe_allow_html=True)
+
+# 한국식 등락 색: 상승=빨강 / 하락=파랑 / 보합=회색
+TOSS_BLUE, UP_RED, DOWN_BLUE, INK, GRAY = "#3182F6", "#F04452", "#3182F6", "#191F28", "#8B95A1"
+
+
+def kcolor(v: float) -> str:
+    return UP_RED if v > 0 else (DOWN_BLUE if v < 0 else GRAY)
+
+
+def hero_card(label: str, value: str, sub_html: str = "") -> str:
+    return (f"<div style='background:#fff;border:1px solid #EEF1F4;border-radius:20px;"
+            f"padding:22px 24px;box-shadow:0 1px 3px rgba(0,0,0,.04);'>"
+            f"<div style='color:{GRAY};font-size:.85rem;font-weight:600;margin-bottom:6px'>{label}</div>"
+            f"<div style='color:{INK};font-size:2.0rem;font-weight:800;letter-spacing:-.5px'>{value}</div>"
+            f"<div style='margin-top:6px;font-size:.95rem;font-weight:600'>{sub_html}</div></div>")
 
 
 @st.cache_resource
@@ -200,9 +241,17 @@ if st.sidebar.button("🔄 캐시 비우기 / 새로고침"):
     st.rerun()
 st.sidebar.caption("백테스트·스크리너는 CLI에서:\n`python -m src.walkforward`")
 
-st.title("📡 ASAB 대시보드")
-tab_collect, tab_model, tab_journal, tab_macro, tab_data = st.tabs(
-    ["📡 수집 현황", "🤖 모델", "🧾 거래저널", "🌐 거시(수출)", "🗂 데이터"])
+_mode_badge = ("🧪 모의투자" if cfg.paper_trading else "🔴 실전투자")
+st.markdown(
+    f"<div style='display:flex;align-items:baseline;gap:12px;margin-bottom:2px'>"
+    f"<span style='font-size:1.9rem;font-weight:800;letter-spacing:-.5px;color:{INK}'>ASAB</span>"
+    f"<span style='color:{GRAY};font-weight:600'>자동매매 모니터</span>"
+    f"<span style='margin-left:auto;color:{GRAY};font-size:.85rem'>{_mode_badge} · {cfg.account_no}-{cfg.account_product_code}</span>"
+    f"</div>", unsafe_allow_html=True)
+st.markdown(f"<div style='color:{GRAY};font-size:.85rem;margin-bottom:14px'>국내 단일 트랙 · 검증 중심</div>",
+            unsafe_allow_html=True)
+tab_journal, tab_macro, tab_model, tab_collect, tab_data = st.tabs(
+    ["🧾 거래", "🌐 거시", "🤖 모델", "📡 수집", "🗂 데이터"])
 
 with tab_collect:
     collection_progress()
@@ -267,9 +316,6 @@ with tab_model:
 
 # --- 거래 저널 탭 ----------------------------------------------------------
 with tab_journal:
-    st.subheader("🧾 거래 저널 (라이브 매매 기록)")
-    st.caption("run_bot(screener_rotation)이 남긴 신호·주문·포지션·계좌 기록. DB만 읽음.")
-
     # 잔고 새로고침: 버튼 클릭 시에만 KIS 조회(휴장일에도 동작) → 스냅샷 저장
     bc1, bc2 = st.columns([1, 3])
     if bc1.button("🔄 잔고 새로고침 (KIS 조회)"):
@@ -300,14 +346,21 @@ with tab_journal:
                 "• 모의주문 1회(평일 장중): `python -m src.run_bot --once`\n\n"
                 "전략을 screener_rotation 으로 설정해야 합니다(config.yaml).")
     else:
-        # 1) 계좌 요약 + 자산추이
+        # 1) 계좌 요약(토스풍 히어로) + 자산추이
         if snaps:
             last = snaps[-1]
-            c = st.columns(4)
-            c[0].metric("총자산", f"₩{last['total_krw']:,.0f}")
-            c[1].metric("현금", f"₩{last['cash_krw']:,.0f}")
-            c[2].metric("주식평가", f"₩{last['holdings_krw']:,.0f}")
-            c[3].metric("평가손익", f"₩{last['unrealized_krw']:,.0f}")
+            pnl = last["unrealized_krw"]
+            base = last["total_krw"] - pnl
+            pct = (pnl / base * 100) if base else 0.0
+            sign = "+" if pnl >= 0 else ""
+            sub = (f"<span style='color:{kcolor(pnl)}'>평가손익 {sign}{pnl:,.0f}원 "
+                   f"({sign}{pct:.2f}%)</span>")
+            hc = st.columns([2, 1, 1])
+            hc[0].markdown(hero_card("총자산", f"{last['total_krw']:,.0f}원", sub),
+                           unsafe_allow_html=True)
+            hc[1].metric("현금", f"{last['cash_krw']:,.0f}원")
+            hc[2].metric("주식평가", f"{last['holdings_krw']:,.0f}원")
+            st.write("")
             sdf = pd.DataFrame(snaps)
             sdf["ts"] = pd.to_datetime(sdf["ts"])
             sdf = sdf.set_index("ts")

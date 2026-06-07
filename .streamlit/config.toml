@@ -1,0 +1,11 @@
+# 토스증권풍 라이트 테마
+[theme]
+base = "light"
+primaryColor = "#3182F6"             # 토스 블루(액센트)
+backgroundColor = "#FFFFFF"          # 본문 흰 배경
+secondaryBackgroundColor = "#F2F4F6" # 카드/사이드바 연회색
+textColor = "#191F28"                # 토스 잉크(짙은 회색)
+font = "sans serif"
+
+[client]
+toolbarMode = "minimal"              # 우상단 툴바 최소화(깔끔)
