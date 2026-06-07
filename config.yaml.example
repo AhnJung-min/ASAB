@@ -41,13 +41,15 @@ strategy:
   short_window: 5
   long_window: 20
 
-  # name 을 아래로 바꾸면 '검증된' 스크리너+시장국면 로테이션으로 동작:
+  # name 을 아래로 바꾸면 '검증된' 로테이션으로 동작:
   # name: "screener_rotation"
-  # top_n: 5                 # 보유 종목 수(동일비중)
+  # top_n: 10                # 보유 종목 수(동일비중). 검증: 10이 5보다 낙폭 적음
   # regime_filter: true      # 지수가 N일선 아래면 현금 보유(하락장 방어)
   # regime_ma: 200           # 시장국면 판정 이동평균(일)
-  # score_method: "screener" # 종목 점수: screener(4팩터) | ml(LightGBM 종합) | blend
-  #   ml/blend 쓰려면 먼저 모델 학습: python -m src.ml_serve --train
+  # score_method: "blend"    # 종목 점수: screener(4팩터) | ml(LightGBM) | blend
+  #   ⚠️ 워크포워드 맞대결(python -m src.strategy_compare) 결과 v1 권장 = blend top10
+  #      (샤프 0.85·MDD -23%). screener 단독은 OOS 최악(샤프 0.22)이라 비권장.
+  #      ml/blend 쓰려면 먼저 모델 학습: python -m src.ml_serve --train
   #
   # --- 리스크 청산(2층) — 0이면 비활성 ---
   # ⚠️ 검증 결과(python -m src.tune_exits): 낙폭의 진짜 통제 수단은 손절이 아니라
