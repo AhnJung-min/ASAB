@@ -94,6 +94,13 @@ def journal_data() -> dict:
             "positions": positions, "snaps": snaps}
 
 
+@st.cache_data(ttl=120)
+def trade_stats_df() -> pd.DataFrame:
+    with open_store() as store:
+        rows = [dict(r) for r in store.get_trade_stats()]
+    return pd.DataFrame(rows)
+
+
 def fetch_balance_snapshot() -> dict:
     """KIS 잔고를 1회 조회해 account_snapshot 으로 저장하고 잔고를 반환한다.
     버튼 클릭 시에만 호출(평소 대시보드는 API 미호출). 휴장일에도 동작(조회).
@@ -194,8 +201,8 @@ if st.sidebar.button("🔄 캐시 비우기 / 새로고침"):
 st.sidebar.caption("백테스트·스크리너는 CLI에서:\n`python -m src.walkforward`")
 
 st.title("📡 ASAB 대시보드")
-tab_collect, tab_model, tab_journal, tab_data = st.tabs(
-    ["📡 수집 현황", "🤖 모델", "🧾 거래저널", "🗂 데이터"])
+tab_collect, tab_model, tab_journal, tab_macro, tab_data = st.tabs(
+    ["📡 수집 현황", "🤖 모델", "🧾 거래저널", "🌐 거시(수출)", "🗂 데이터"])
 
 with tab_collect:
     collection_progress()
@@ -347,6 +354,64 @@ with tab_journal:
             st.dataframe(view, width="stretch", hide_index=True, height=280)
         else:
             st.caption("신호 기록 없음.")
+
+
+# --- 거시(수출입동향) 탭 ---------------------------------------------------
+with tab_macro:
+    st.subheader("🌐 수출입동향 (MOTIE 월간 거시지표)")
+    st.caption("`python -m src.trade_stats <PDF> --save` 로 매달 적재. 달이 쌓일수록 추이가 채워집니다.")
+    tdf = trade_stats_df()
+    if tdf.empty:
+        st.info("아직 적재된 수출입동향이 없습니다.\n\n"
+                "PDF를 받으면: `python -m src.trade_stats \"2026년 4월 수출입동향.pdf\" --save`")
+    else:
+        months = sorted(tdf["month"].unique())
+        latest = months[-1]
+
+        def _v(metric, field, month=latest):
+            r = tdf[(tdf.metric == metric) & (tdf.field == field) & (tdf.month == month)]
+            return float(r["value"].iloc[0]) if len(r) else None
+
+        st.markdown(f"**기준월: {latest}**  (적재 {len(months)}개월)")
+        c = st.columns(3)
+        c[0].metric("총수출", f"{_v('export','usd_bil') or 0:,.1f}억$",
+                    f"{_v('export','yoy') or 0:+.1f}%")
+        c[1].metric("총수입", f"{_v('import','usd_bil') or 0:,.1f}억$",
+                    f"{_v('import','yoy') or 0:+.1f}%")
+        c[2].metric("무역수지", f"{_v('balance','usd_bil') or 0:+,.1f}억$")
+
+        # 품목별 최신 YoY (수혜/역풍 한눈에)
+        skip = {"export", "import", "balance", "전체"}
+        item_rows = tdf[(tdf.field == "yoy") & (tdf.month == latest)
+                        & (~tdf.metric.isin(skip)) & (~tdf.metric.str.startswith("mem_"))]
+        if not item_rows.empty:
+            bar = item_rows.set_index("metric")["value"].sort_values(ascending=False)
+            st.markdown("**품목별 수출 증감률(YoY %)** — 🟢수혜 / 🔴역풍")
+            st.bar_chart(bar, color="#4C9BE8")
+
+        # 품목별 수출액 추이(달이 쌓이면 라인이 길어짐)
+        amt = tdf[(tdf.field == "usd_bil") & (~tdf.metric.isin({"export","import","balance"}))
+                  & (~tdf.metric.str.startswith("mem_")) & (tdf.metric != "전체")]
+        if not amt.empty and len(months) >= 2:
+            pivot = amt.pivot_table(index="month", columns="metric", values="value")
+            st.markdown("**품목별 수출액 추이(억$)**")
+            st.line_chart(pivot)
+        elif not amt.empty:
+            st.caption("※ 품목별 추이 차트는 2개월 이상 적재되면 표시됩니다(현재 1개월).")
+
+        # 메모리 고정가
+        mem = tdf[(tdf.month == latest) & (tdf.metric.str.startswith("mem_"))
+                  & (tdf.field == "price_usd")]
+        if not mem.empty:
+            mc = st.columns(len(mem))
+            for col, (_, row) in zip(mc, mem.iterrows()):
+                name = row["metric"].replace("mem_", "")
+                yoy = _v(row["metric"], "yoy")
+                col.metric(f"{name} 고정가", f"{row['value']}$",
+                           f"{yoy:+.0f}%" if yoy is not None else None)
+
+        st.caption("⚠️ 수출동향은 1개월 시차의 후행지표 — 매매 직결이 아니라 '거시 확인·섹터 참고'용. "
+                   "신호화(C)는 여러 달 누적 후 백테스트 검증 필요.")
 
 
 with tab_data:
