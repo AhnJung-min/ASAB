@@ -28,17 +28,51 @@ def market_regime(store: DataStore, regime_ma: int = 200) -> tuple[bool, str | N
     return closes[-1] > sma, rows[-1]["date"]
 
 
+def _rank(store: DataStore, method: str, max_pool: int = 300) -> tuple[list[dict[str, Any]], str]:
+    """method 별 종목 순위 리스트(내림차순) + 실제 사용된 method 반환.
+
+      screener : 4팩터 점수(현행)
+      ml       : 학습된 LightGBM 종합점수(14지표 융합). 모델 없으면 screener 폴백.
+      blend    : 스크리너 백분위 + ML 백분위 평균
+    """
+    if method == "screener":
+        return screen(store), "screener"
+
+    from .ml_serve import predict_universe
+    ml = predict_universe(store, max_pool=max_pool)
+    if not ml:  # 모델 미학습 → 안전 폴백
+        return screen(store), "screener(ml모델없음)"
+
+    if method == "ml":
+        return [{"symbol": d["symbol"], "name": d["name"],
+                 "score": d["ml_score"], "last_close": d.get("last_close")} for d in ml], "ml"
+
+    # blend: 두 점수의 횡단면 백분위 평균
+    scr = {c["symbol"]: c for c in screen(store)}
+    ml_by = {d["symbol"]: d for d in ml}
+    common = [s for s in ml_by if s in scr]
+    if len(common) < 2:
+        return screen(store), "screener(blend불가)"
+    def pct(order: list[str]) -> dict[str, float]:
+        n = len(order)
+        return {s: i / (n - 1) for i, s in enumerate(order)}
+    scr_pct = pct(sorted(common, key=lambda s: scr[s].get("score", 0.0)))
+    ml_pct = pct(sorted(common, key=lambda s: ml_by[s]["ml_score"]))
+    rows = [{"symbol": s, "name": ml_by[s]["name"],
+             "score": round(0.5 * scr_pct[s] + 0.5 * ml_pct[s], 4),
+             "last_close": ml_by[s].get("last_close")} for s in common]
+    rows.sort(key=lambda c: -c["score"])
+    return rows, "blend"
+
+
 def target_portfolio(store: DataStore, top_n: int = 5, regime_filter: bool = True,
-                     regime_ma: int = 200) -> dict[str, Any]:
+                     regime_ma: int = 200, method: str = "screener") -> dict[str, Any]:
     """상위 N 타깃 종목 + 국면 정보 반환.
 
-    반환: {
-      "asof": 기준 데이터 날짜,
-      "regime_on": bool,
-      "picks": [{symbol,name,rank,score}, ...]  # 국면 off 면 빈 리스트(현금)
-    }
+    method: screener(4팩터) | ml(LightGBM 종합) | blend(둘 혼합).
+    반환: {asof, regime_on, picks:[{symbol,name,rank,score,last_close}], method}
     """
-    ranked = screen(store)  # 개별주(ETF 제외) 팩터 순위, 유동성 필터 포함
+    ranked, used = _rank(store, method)
     on, asof = market_regime(store, regime_ma) if regime_filter else (True, None)
     if asof is None and ranked:
         asof = store.latest_date(ranked[0]["symbol"])
@@ -53,7 +87,7 @@ def target_portfolio(store: DataStore, top_n: int = 5, regime_filter: bool = Tru
                 "score": round(c.get("score", 0.0), 4),
                 "last_close": c.get("last_close"),
             })
-    return {"asof": asof, "regime_on": on, "picks": picks}
+    return {"asof": asof, "regime_on": on, "picks": picks, "method": used}
 
 
 def main() -> None:
@@ -66,15 +100,17 @@ def main() -> None:
     ap.add_argument("--top-n", type=int, default=5)
     ap.add_argument("--no-regime", action="store_true", help="시장국면 필터 끄기")
     ap.add_argument("--regime-ma", type=int, default=200)
+    ap.add_argument("--method", choices=["screener", "ml", "blend"], default="screener",
+                    help="점수 방식: screener(4팩터)/ml(종합)/blend")
     args = ap.parse_args()
 
     store = DataStore()
-    tp = target_portfolio(store, top_n=args.top_n,
-                          regime_filter=not args.no_regime, regime_ma=args.regime_ma)
+    tp = target_portfolio(store, top_n=args.top_n, regime_filter=not args.no_regime,
+                          regime_ma=args.regime_ma, method=args.method)
     store.close()
 
     state = "risk-ON(투자)" if tp["regime_on"] else "risk-OFF(현금)"
-    print(f"기준일 {tp['asof']} · 시장국면 {state}")
+    print(f"기준일 {tp['asof']} · 시장국면 {state} · 점수={tp['method']}")
     if not tp["picks"]:
         print("타깃 없음(현금 보유).")
         return
