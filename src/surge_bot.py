@@ -93,6 +93,10 @@ class SurgeBot:
         self.sell_band_bps = float(s.get("sell_band_bps", 50))  # 매도 체결우선 하한
         self.quote_market = str(s.get("quote_market", "UN")).upper()  # UN통합/J KRX/NX
         self.interval = int(s.get("poll_interval_sec", 30))
+        self.use_model = bool(s.get("use_model", True))       # 학습모델로 후보 점수화
+        self.min_pred_ret = float(s.get("min_pred_ret", -1.0))  # 예측수익 이 미만 후보 제외(-1=제외안함)
+        self._model_bundle: dict | None = None
+        self._model_mtime = 0.0
 
         # 메모리 상태
         self.positions: dict[str, dict] = {}    # symbol -> {trade_id, entry_price, peak, qty, entry_ts, name}
@@ -122,6 +126,34 @@ class SurgeBot:
         except KISApiError as e:
             log(f"  스캔 오류: {e}")
             return []
+
+    def _current_model(self) -> dict | None:
+        """학습 모델을 로드하되, 파일이 갱신되면(재학습) 자동 재로드(연속학습)."""
+        from .surge_ml import MODEL_PATH, load_model
+        try:
+            m = MODEL_PATH.stat().st_mtime
+        except OSError:
+            return None
+        if m != self._model_mtime:
+            self._model_bundle = load_model()
+            self._model_mtime = m
+            if self._model_bundle:
+                meta = self._model_bundle.get("meta", {})
+                log(f"  🤖 ML 모델 로드(학습 {meta.get('rows','?')}행, "
+                    f"OOS IC {meta.get('oos_ic')})")
+        return self._model_bundle
+
+    def _apply_model(self, candidates: list[dict], n_scan: int) -> None:
+        """모델이 있으면 후보에 예측수익 점수를 매겨 재정렬하고 하한 미만은 제외."""
+        if not self.use_model or not candidates:
+            return
+        bundle = self._current_model()
+        if not bundle:
+            return  # 모델 없으면 기존(등락률순) 유지
+        from .surge_ml import score_candidates
+        score_candidates(bundle, candidates, n_scan)
+        candidates[:] = [c for c in candidates if c.get("ml_score", 0.0) >= self.min_pred_ret]
+        candidates.sort(key=lambda c: -c.get("ml_score", 0.0))
 
     def filter_candidates(self, scanned: list[dict]) -> list[dict]:
         out = []
@@ -262,8 +294,10 @@ class SurgeBot:
         if scanned:
             self.store.save_surge_scan(now.strftime("%Y-%m-%d %H:%M:%S"), scanned)
         candidates = self.filter_candidates(scanned)
+        self._apply_model(candidates, len(scanned))  # 모델 있으면 ML점수로 재정렬·필터
         if self.dry_run:
-            log(f"  스캔 {len(scanned)}종목 · 필터 통과 {len(candidates)}종목 · 빈자리 {room}")
+            tag = " · ML점수순" if self._model_bundle and self.use_model else ""
+            log(f"  스캔 {len(scanned)}종목 · 필터 통과 {len(candidates)}종목 · 빈자리 {room}{tag}")
         for r in candidates[:room]:
             sym = r["symbol"]
             limit = limit_price("buy", r["price"], self.buy_band_bps)
@@ -286,7 +320,8 @@ class SurgeBot:
                     "symbol": sym, "name": r["name"], "market": "",
                     "entry_ts": now.strftime("%Y-%m-%d %H:%M:%S"),
                     "entry_price": limit, "qty": qty,
-                    "entry_rate": r["rate"], "entry_volume": r["volume"]})
+                    "entry_rate": r["rate"], "entry_volume": r["volume"],
+                    "entry_rank": r.get("rank"), "entry_nscan": len(scanned)})
                 self.pending_buys[sym] = {
                     "trade_id": tid, "entry_rate": r["rate"], "volume": r["volume"],
                     "name": r["name"], "ts": now}
