@@ -85,7 +85,10 @@ strategy:
 #   python -m src.surge_bot             # 주기 반복(장중 내내)
 surge:
   market: "0000"          # 스캔 시장: 0000전체 / 0001코스피 / 1001코스닥
+  scan_source: "both"     # 후보 출처: rate(등락률상위) / value(거래대금상위·유동성) / both
   scan_top: 40            # 등락률 상위 몇 종목 받을지
+  value_top: 40           # 거래대금 상위 몇 종목 받을지(유동성 단타 유니버스)
+  exclude_etf: true       # 지수 ETF/ETN 제외(개별주만 단타). 거래대금 상위엔 ETF 섞임
   min_rate: 5.0           # 진입 최소 등락률(%)
   max_rate: 20.0          # 이 이상은 상한가 추격=체결불가라 제외
   min_volume: 100000      # 최소 누적거래량(유동성)

@@ -53,6 +53,17 @@ def is_leverage_inverse(name: str) -> bool:
     return any(k in up for k in _LEV_INV_KEYWORDS)
 
 
+# ETF/ETN 브랜드 접두어. 거래대금 상위엔 지수 ETF가 섞이므로 '개별주만' 위해 제외.
+_ETF_BRANDS = ("KODEX", "TIGER", "KBSTAR", "ARIRANG", "KOSEF", "HANARO", "ACE",
+               "SOL", "RISE", "PLUS", "KINDEX", "TIMEFOLIO", "WOORI", "BNK",
+               "FOCUS", "히어로즈", "마이티", "korea")
+
+
+def is_etf(name: str) -> bool:
+    up = (name or "").upper()
+    return any(up.startswith(b.upper()) or (" " + b.upper()) in up for b in _ETF_BRANDS)
+
+
 def kr_market_open(now: datetime | None = None) -> bool:
     """국내 정규장(평일 09:00~15:30 KST) 대략 판정."""
     now = now or datetime.now()
@@ -76,7 +87,10 @@ class SurgeBot:
         s = raw.get("surge", {}) or {}
 
         self.market = str(s.get("market", "0000"))      # 0000전체/0001코스피/1001코스닥
+        self.scan_source = str(s.get("scan_source", "both")).lower()  # rate|value|both
         self.scan_top = int(s.get("scan_top", 40))
+        self.value_top = int(s.get("value_top", 40))     # 거래대금 상위 스캔 수
+        self.exclude_etf = bool(s.get("exclude_etf", True))  # 지수 ETF 제외(개별주만)
         self.min_rate = float(s.get("min_rate", 5.0))    # 최소 등락률%
         self.max_rate = float(s.get("max_rate", 20.0))   # 상한가 추격 방지(체결 불가)
         self.min_volume = int(s.get("min_volume", 100_000))
@@ -121,12 +135,34 @@ class SurgeBot:
 
     # --- 스캔/필터 ----------------------------------------------------------
     def scan(self) -> list[dict]:
-        try:
-            return self.dom.top_gainers(self.scan_top, gubn="up", market=self.market,
-                                        min_price=self.price_min, min_volume=self.min_volume)
-        except KISApiError as e:
-            log(f"  스캔 오류: {e}")
-            return []
+        """등락률 상위 + 거래대금 상위(유동성 풍부)를 합쳐 후보 풀 구성(중복 제거).
+
+        source 태그를 달아 둔다(rate=급등 추격, value=유동성 단타). 매수 조건은
+        동일 필터(오르는 중+유동성+비레버리지/ETF)라 거래대금 유니버스에선
+        '유동성 좋고 오늘 상승 중'인 우량주만 자연히 걸린다(새 임계값 없음).
+        """
+        out: list[dict] = []
+        seen: set[str] = set()
+        jobs = []
+        if self.scan_source in ("rate", "both"):
+            jobs.append(("rate", lambda: self.dom.top_gainers(
+                self.scan_top, gubn="up", market=self.market,
+                min_price=self.price_min, min_volume=self.min_volume)))
+        if self.scan_source in ("value", "both"):
+            jobs.append(("value", lambda: self.dom.top_value(
+                self.value_top, market=self.market,
+                min_price=self.price_min, min_volume=self.min_volume)))
+        for src, fn in jobs:
+            try:
+                for r in fn():
+                    if r["symbol"] in seen:
+                        continue
+                    seen.add(r["symbol"])
+                    r["source"] = src
+                    out.append(r)
+            except KISApiError as e:
+                log(f"  스캔 오류({src}): {e}")
+        return out
 
     def _current_model(self) -> dict | None:
         """학습 모델을 로드하되, 파일이 갱신되면(재학습) 자동 재로드(연속학습)."""
@@ -176,6 +212,8 @@ class SurgeBot:
         for r in scanned:
             if self.exclude_lev and is_leverage_inverse(r["name"]):
                 continue  # 레버리지·인버스 파생상품 제외
+            if self.exclude_etf and is_etf(r["name"]):
+                continue  # 지수 ETF/ETN 제외(개별주만 단타)
             if not (self.min_rate <= r["rate"] <= self.max_rate):
                 continue
             if r["volume"] < self.min_volume:

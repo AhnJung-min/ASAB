@@ -128,6 +128,46 @@ class DomesticStock:
                 continue
         return rows[:top]
 
+    def top_value(self, top: int = 30, *, market: str = "0000",
+                  min_price: int = 0, min_volume: int = 0) -> list[dict[str, Any]]:
+        """거래대금(거래금액) 순위. 유동성 풍부한 단타 유니버스(스파이커 아님).
+
+        반환: top_gainers 와 동일 형태 + value(거래대금). (거래량순위 FHPST01710000,
+        FID_BLNG_CLS_CODE=3=거래금액순). 대형 우량주 위주라 단타에 건강한 풀.
+        """
+        data = self.c.get(
+            "/uapi/domestic-stock/v1/quotations/volume-rank",
+            tr_id="FHPST01710000",
+            params={
+                "FID_COND_MRKT_DIV_CODE": "J",
+                "FID_COND_SCR_DIV_CODE": "20171",
+                "FID_INPUT_ISCD": market,
+                "FID_DIV_CLS_CODE": "0",          # 0=전체
+                "FID_BLNG_CLS_CODE": "3",         # 3=거래금액(거래대금)순
+                "FID_TRGT_CLS_CODE": "111111111",
+                "FID_TRGT_EXLS_CLS_CODE": "0000000000",
+                "FID_INPUT_PRICE_1": str(min_price) if min_price else "",
+                "FID_INPUT_PRICE_2": "",
+                "FID_VOL_CNT": str(min_volume) if min_volume else "",
+                "FID_INPUT_DATE_1": "",
+            },
+        )
+        rows: list[dict[str, Any]] = []
+        for r in data.get("output", []):
+            try:
+                rows.append({
+                    "symbol": r["mksc_shrn_iscd"],
+                    "name": r["hts_kor_isnm"],
+                    "price": int(r["stck_prpr"]),
+                    "rate": float(r["prdy_ctrt"]),         # 등락률%
+                    "volume": int(r.get("acml_vol", 0) or 0),
+                    "value": int(r.get("acml_tr_pbmn", 0) or 0),  # 거래대금
+                    "rank": int(r.get("data_rank", 0) or 0),
+                })
+            except (KeyError, ValueError):
+                continue
+        return rows[:top]
+
     # --- 주문 ---------------------------------------------------------------
     def _order(self, symbol: str, qty: int, side: str, price: int = 0) -> dict[str, Any]:
         """side: 'buy' | 'sell'. price=0 이면 시장가."""
