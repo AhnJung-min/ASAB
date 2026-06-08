@@ -214,8 +214,8 @@ class SurgeBot:
         uk = sum(h["pnl"] for h in bal["holdings"])
         self.store.save_account_snapshot(now.strftime("%Y-%m-%d %H:%M:%S"), {
             "cash_krw": bal["cash"], "holdings_krw": hk,
-            "total_krw": bal["cash"] + hk, "realized_krw": 0.0,
-            "unrealized_krw": uk, "fx_rate": 1.0})
+            "total_krw": bal.get("total") or (bal["cash"] + hk),
+            "realized_krw": 0.0, "unrealized_krw": uk, "fx_rate": 1.0})
 
     # 주의: 예전엔 _adopt_orphans 로 계좌의 모든 보유분을 인수해 관리했으나(미국
     # 단독계좌 시절), 국내는 일봉 로테이션 봇과 계좌를 공유할 수 있어 이 봇이

@@ -204,8 +204,8 @@ def run_rotation(once: bool = False, plan: bool = False, dry_run: bool = False) 
             uk = sum(h["pnl"] for h in bal["holdings"])
             store.save_account_snapshot(_now(), {
                 "cash_krw": bal["cash"], "holdings_krw": hk,
-                "total_krw": bal["cash"] + hk, "realized_krw": 0.0,
-                "unrealized_krw": uk, "fx_rate": 1.0})
+                "total_krw": bal.get("total") or (bal["cash"] + hk),
+                "realized_krw": 0.0, "unrealized_krw": uk, "fx_rate": 1.0})
         except KISApiError:
             pass
 

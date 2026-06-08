@@ -160,7 +160,13 @@ class DomesticStock:
 
     # --- 잔고 ---------------------------------------------------------------
     def balance(self) -> dict[str, Any]:
-        """보유 종목 및 예수금 조회. 반환: {'holdings': [...], 'cash': int}."""
+        """보유 종목 및 예수금 조회.
+
+        반환: {'holdings':[...], 'cash':int, 'total':int, 'deposit_total':int}
+          cash  = prvs_rcdl_excc_amt(D+2 정산 예수금) = 매수로 실제 빠져나간 '진짜 현금'.
+                  dnca_tot_amt(예수금총액)는 T+2 미정산이라 매수해도 안 줄어 부정확.
+          total = nass_amt(순자산) = cash + 보유평가액. (cash+holdings 와 일치 확인됨)
+        """
         tr_id = "VTTC8434R" if self.paper else "TTTC8434R"
         data = self.c.get(
             "/uapi/domestic-stock/v1/trading/inquire-balance",
@@ -192,8 +198,19 @@ class DomesticStock:
             if int(row.get("hldg_qty", 0)) > 0
         ]
         summary = (data.get("output2") or [{}])[0]
-        cash = int(summary.get("dnca_tot_amt", 0))  # 예수금총금액
-        return {"holdings": holdings, "cash": cash}
+
+        def _amt(k: str) -> int:
+            try:
+                return int(float(summary.get(k, 0) or 0))
+            except (TypeError, ValueError):
+                return 0
+
+        # D+2 정산 예수금이 매수/매도를 반영한 진짜 현금. 키 없으면 예수금총액 폴백.
+        cash = (_amt("prvs_rcdl_excc_amt") if "prvs_rcdl_excc_amt" in summary
+                else _amt("dnca_tot_amt"))
+        total = _amt("nass_amt") or (cash + sum(h["eval_amt"] for h in holdings))
+        return {"holdings": holdings, "cash": cash, "total": total,
+                "deposit_total": _amt("dnca_tot_amt")}
 
     def position_qty(self, symbol: str) -> int:
         for h in self.balance()["holdings"]:
