@@ -91,6 +91,7 @@ surge:
   min_volume: 100000      # 최소 누적거래량(유동성)
   price_min: 1000         # 동전주 배제(원)
   price_max: 100000       # 고가주 배제(원)
+  exclude_leverage_inverse: true  # 레버리지·인버스 ETN/ETF 제외(추세가정·decay 부적합)
   max_positions: 3        # 동시 보유 종목 수
   order_value_krw: 300000 # 종목당 배정금액(원). 0이면 order_qty 사용
   order_qty: 1            # order_value_krw=0 일 때 주문 수량

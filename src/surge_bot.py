@@ -43,6 +43,16 @@ def log(msg: str) -> None:
     print(f"[{datetime.now():%H:%M:%S}] {msg}", flush=True)
 
 
+# 레버리지·인버스 파생상품 종목명 키워드(대문자 비교). 단타 추세가정과 안 맞고
+# decay/청산위험이 있어 기본 제외. 일반 ETF/ETN 은 남긴다.
+_LEV_INV_KEYWORDS = ("레버리지", "인버스", "2X", "3X", "곱버스")
+
+
+def is_leverage_inverse(name: str) -> bool:
+    up = (name or "").upper()
+    return any(k in up for k in _LEV_INV_KEYWORDS)
+
+
 def kr_market_open(now: datetime | None = None) -> bool:
     """국내 정규장(평일 09:00~15:30 KST) 대략 판정."""
     now = now or datetime.now()
@@ -72,6 +82,7 @@ class SurgeBot:
         self.min_volume = int(s.get("min_volume", 100_000))
         self.price_min = int(s.get("price_min", 1_000))  # 동전주 배제
         self.price_max = int(s.get("price_max", 100_000))
+        self.exclude_lev = bool(s.get("exclude_leverage_inverse", True))  # 레버리지·인버스 제외
         self.max_positions = int(s.get("max_positions", 3))
         self.order_value_krw = int(s.get("order_value_krw", 0))  # 종목당 배정금(0=order_qty)
         self.order_qty = int(s.get("order_qty", 1))
@@ -113,6 +124,8 @@ class SurgeBot:
     def filter_candidates(self, scanned: list[dict]) -> list[dict]:
         out = []
         for r in scanned:
+            if self.exclude_lev and is_leverage_inverse(r["name"]):
+                continue  # 레버리지·인버스 파생상품 제외
             if not (self.min_rate <= r["rate"] <= self.max_rate):
                 continue
             if r["volume"] < self.min_volume:
