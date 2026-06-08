@@ -104,6 +104,8 @@ class SurgeBot:
 
     def _resume_open_trades(self) -> None:
         for t in self.store.open_trades():
+            if t["entry_rate"] is None:
+                continue  # entry_rate 없는 행=옛 인수(orphan) 잔재 → 관리 대상 아님
             self.positions[t["symbol"]] = {
                 "trade_id": t["id"], "entry_price": t["entry_price"],
                 "peak": t["entry_price"], "qty": t["qty"],
@@ -154,7 +156,6 @@ class SurgeBot:
         self._save_account(now, bal)
 
         self._reconcile_buys(held, now)
-        self._adopt_orphans(held, now)
         self._reconcile_sells(held, now)
         self._check_exits(held, now)
         self._enter_new(now)
@@ -167,20 +168,10 @@ class SurgeBot:
             "total_krw": bal["cash"] + hk, "realized_krw": 0.0,
             "unrealized_krw": uk, "fx_rate": 1.0})
 
-    def _adopt_orphans(self, held: dict, now: datetime) -> None:
-        """DB/메모리에 없는 실제 보유분을 포지션으로 인수해 익절/손절 대상에 포함."""
-        for sym, h in held.items():
-            if sym in self.positions or sym in self.pending_buys or h["qty"] <= 0:
-                continue
-            tid = self.store.open_trade({
-                "symbol": sym, "name": h["name"], "market": "",
-                "entry_ts": now.strftime("%Y-%m-%d %H:%M:%S"),
-                "entry_price": h["avg_price"], "qty": h["qty"],
-                "entry_rate": None, "entry_volume": None})
-            self.positions[sym] = {
-                "trade_id": tid, "entry_price": h["avg_price"], "peak": h["avg_price"],
-                "qty": h["qty"], "entry_ts": now, "name": h["name"]}
-            log(f"  🔗 보유분 인수: {h['name']}({sym}) {h['qty']}주 @ {h['avg_price']:,.0f}원")
+    # 주의: 예전엔 _adopt_orphans 로 계좌의 모든 보유분을 인수해 관리했으나(미국
+    # 단독계좌 시절), 국내는 일봉 로테이션 봇과 계좌를 공유할 수 있어 이 봇이
+    # 산 적도 없는 종목(로테이션 보유분)을 손절 청산하는 사고가 났다. 따라서 이
+    # 봇은 **자기가 매수한 포지션(surge_trade)만** 관리하고 남의 보유분은 안 건드린다.
 
     def _reconcile_buys(self, held: dict, now: datetime) -> None:
         for sym, meta in list(self.pending_buys.items()):
