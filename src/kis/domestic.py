@@ -28,6 +28,55 @@ class DomesticStock:
         )
         return int(data["output"]["stck_prpr"])
 
+    # --- 순위(스캔) ---------------------------------------------------------
+    def top_gainers(self, top: int = 30, *, gubn: str = "up",
+                    market: str = "0000", min_price: int = 0,
+                    min_volume: int = 0) -> list[dict[str, Any]]:
+        """장중 등락률 순위. 단타 스캔용(한 호출로 다수 종목 → 호출제한 절약).
+
+          top      : 상위 몇 종목
+          gubn     : 'up'=상승률 상위 / 'down'=하락률 상위
+          market   : '0000'=전체 / '0001'=코스피 / '1001'=코스닥
+          min_price/min_volume : 가격·거래량 하한 필터(0=무시)
+
+        반환: [{symbol, name, price, rate(등락률%), volume, rank}, ...]
+        스캔→매수까지 surge_bot 국내 이식의 진입점. (등락률순위 FHPST01700000)
+        """
+        data = self.c.get(
+            "/uapi/domestic-stock/v1/ranking/fluctuation",
+            tr_id="FHPST01700000",  # 등락률 순위(시세계 → 모의/실전 동일)
+            params={
+                "fid_cond_mrkt_div_code": "J",
+                "fid_cond_scr_div_code": "20170",
+                "fid_input_iscd": market,
+                "fid_rank_sort_cls_code": "0" if gubn == "up" else "1",
+                "fid_input_cnt_1": "0",       # 누적일수(0=당일)
+                "fid_prc_cls_code": "1",      # 1=종가대비(등락률)
+                "fid_input_price_1": str(min_price) if min_price else "",
+                "fid_input_price_2": "",
+                "fid_vol_cnt": str(min_volume) if min_volume else "",
+                "fid_trgt_cls_code": "0",
+                "fid_trgt_exls_cls_code": "0",
+                "fid_div_cls_code": "0",      # 0=전체
+                "fid_rsfl_rate1": "",
+                "fid_rsfl_rate2": "",
+            },
+        )
+        rows: list[dict[str, Any]] = []
+        for r in data.get("output", []):
+            try:
+                rows.append({
+                    "symbol": r["stck_shrn_iscd"],
+                    "name": r["hts_kor_isnm"],
+                    "price": int(r["stck_prpr"]),
+                    "rate": float(r["prdy_ctrt"]),     # 전일대비율(등락률%)
+                    "volume": int(r["acml_vol"]),      # 누적거래량
+                    "rank": int(r.get("data_rank", 0) or 0),
+                })
+            except (KeyError, ValueError):
+                continue
+        return rows[:top]
+
     # --- 주문 ---------------------------------------------------------------
     def _order(self, symbol: str, qty: int, side: str, price: int = 0) -> dict[str, Any]:
         """side: 'buy' | 'sell'. price=0 이면 시장가."""
