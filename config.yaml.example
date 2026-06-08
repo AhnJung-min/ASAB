@@ -108,6 +108,10 @@ surge:
   quote_market: "UN"      # 시세: UN통합(KRX+NXT) / J KRX / NX 넥스트레이드
   poll_interval_sec: 30   # 폴링 주기(초). 모의 호출제한 고려해 너무 짧게 금지
   ob_capture_top: 8       # 호가 잔량 임밸런스 수집할 상위 후보 수(호출제한↔피처품질)
+  # --- 지수 국면 필터(방어) — Track1에서 검증된 최강 낙폭 통제수단 ---
+  regime_filter: true     # 지수 급락 중이면 신규 매수 중단(청산·수집은 계속)
+  regime_index: "069500"  # 시장 국면 프록시(KODEX200 등락률)
+  regime_min_chg: -1.5    # 지수 등락률 이 % 미만이면 매수 OFF
   # --- 학습 모델(선택) — data/surge_model.pkl 있을 때만 작동 ---
   # 단타 데이터를 쌓아 학습: python -m src.surge_ml --train (데이터 충분 시)
   # 모델이 있으면 매수 후보를 '예측 N분 수익'으로 재정렬한다. 없으면 등락률순.

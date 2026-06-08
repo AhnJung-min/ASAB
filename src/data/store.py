@@ -164,7 +164,8 @@ CREATE TABLE IF NOT EXISTS surge_scan (
     market TEXT, symbol TEXT, name TEXT,
     price  REAL, rate REAL, volume INTEGER,
     rank   INTEGER,         -- 순위(학습 피처)
-    source TEXT             -- 후보 출처: rate(등락률) | value(거래대금)
+    source TEXT,            -- 후보 출처: rate(등락률) | value(거래대금)
+    index_chg REAL          -- 그 시점 지수(KODEX200) 등락률%(시장국면 피처)
 );
 CREATE INDEX IF NOT EXISTS idx_surge_scan_ts ON surge_scan(ts);
 CREATE INDEX IF NOT EXISTS idx_surge_scan_sym ON surge_scan(symbol, ts);
@@ -240,7 +241,8 @@ class DataStore:
                     self.conn.execute(f"DROP TABLE {tbl}")
                     self.conn.commit()
         # 학습 피처 컬럼 추가(구 DB 보강) — 기존 데이터 보존
-        self._add_columns("surge_scan", {"rank": "INTEGER", "source": "TEXT"})
+        self._add_columns("surge_scan",
+                          {"rank": "INTEGER", "source": "TEXT", "index_chg": "REAL"})
         self._add_columns("surge_trade",
                           {"entry_rank": "INTEGER", "entry_nscan": "INTEGER",
                            "entry_ob_imbalance": "REAL"})
@@ -538,10 +540,12 @@ class DataStore:
     # --- 급등주 스캔/매매(국내 단타 트랙) ---------------------------------
     def save_surge_scan(self, ts: str, rows: Iterable[dict[str, Any]]) -> int:
         data = [(ts, r.get("market", ""), r["symbol"], r["name"], r["price"],
-                 r["rate"], r["volume"], r.get("rank"), r.get("source")) for r in rows]
+                 r["rate"], r["volume"], r.get("rank"), r.get("source"),
+                 r.get("index_chg")) for r in rows]
         self.conn.executemany(
-            "INSERT INTO surge_scan (ts,market,symbol,name,price,rate,volume,rank,source) "
-            "VALUES (?,?,?,?,?,?,?,?,?)", data)
+            "INSERT INTO surge_scan "
+            "(ts,market,symbol,name,price,rate,volume,rank,source,index_chg) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)", data)
         self.conn.commit()
         return len(data)
 

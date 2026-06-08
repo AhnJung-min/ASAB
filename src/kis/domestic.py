@@ -28,6 +28,18 @@ class DomesticStock:
         )
         return int(data["output"]["stck_prpr"])
 
+    def index_change(self, symbol: str = "069500", market: str = "J") -> float:
+        """시장 국면 프록시(기본 KODEX200)의 당일 등락률%. 지수 급락 시 방어용."""
+        data = self.c.get(
+            "/uapi/domestic-stock/v1/quotations/inquire-price",
+            tr_id="FHKST01010100",
+            params={"FID_COND_MRKT_DIV_CODE": market, "FID_INPUT_ISCD": symbol},
+        )
+        try:
+            return float(data["output"]["prdy_ctrt"])
+        except (KeyError, ValueError, TypeError):
+            return 0.0
+
     def order_book(self, symbol: str, market: str = "J") -> dict[str, Any]:
         """호가창(매수/매도 잔량) 조회. 단타 핵심 피처=잔량 임밸런스.
 

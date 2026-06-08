@@ -109,6 +109,9 @@ class SurgeBot:
         self.quote_market = str(s.get("quote_market", "UN")).upper()  # UN통합/J KRX/NX
         self.interval = int(s.get("poll_interval_sec", 30))
         self.ob_capture_top = int(s.get("ob_capture_top", 8))  # 호가 임밸런스 수집할 상위 후보수
+        self.regime_filter = bool(s.get("regime_filter", True))   # 지수 급락 시 매수 중단
+        self.regime_index = str(s.get("regime_index", "069500"))  # 국면 프록시(KODEX200)
+        self.regime_min_chg = float(s.get("regime_min_chg", -1.5))  # 지수 등락률 이 미만이면 OFF
         self.use_model = bool(s.get("use_model", True))       # 학습모델로 후보 점수화
         self.min_pred_ret = float(s.get("min_pred_ret", -1.0))  # 예측수익 이 미만 후보 제외(-1=제외안함)
         self._model_bundle: dict | None = None
@@ -180,6 +183,13 @@ class SurgeBot:
                 log(f"  🤖 ML 모델 로드(학습 {meta.get('rows','?')}행, "
                     f"OOS IC {meta.get('oos_ic')})")
         return self._model_bundle
+
+    def _index_change(self) -> float:
+        """시장 국면 프록시 지수 등락률%. 조회 실패 시 0(중립=매수 허용)."""
+        try:
+            return self.dom.index_change(self.regime_index)
+        except KISApiError:
+            return 0.0
 
     def _capture_orderbook(self, candidates: list[dict], now: datetime) -> None:
         """상위 후보의 호가 잔량 임밸런스 수집(호출제한 위해 상위 N개만).
@@ -346,6 +356,9 @@ class SurgeBot:
         if room <= 0:
             return
         scanned = self.scan()
+        idx_chg = self._index_change()               # 시장 국면(지수 등락률)
+        for r in scanned:
+            r["index_chg"] = idx_chg                 # 학습 피처로 함께 저장
         if scanned:
             self.store.save_surge_scan(now.strftime("%Y-%m-%d %H:%M:%S"), scanned)
         candidates = self.filter_candidates(scanned)
@@ -353,7 +366,13 @@ class SurgeBot:
         self._apply_model(candidates, len(scanned))  # 모델 있으면 ML점수로 재정렬·필터
         if self.dry_run:
             tag = " · ML점수순" if self._model_bundle and self.use_model else ""
-            log(f"  스캔 {len(scanned)}종목 · 필터 통과 {len(candidates)}종목 · 빈자리 {room}{tag}")
+            log(f"  스캔 {len(scanned)}종목 · 필터 통과 {len(candidates)}종목 · "
+                f"빈자리 {room} · 지수 {idx_chg:+.2f}%{tag}")
+        # 지수 국면 필터: 시장이 급락 중이면 신규 매수 중단(데이터 수집·청산은 계속)
+        if self.regime_filter and idx_chg < self.regime_min_chg:
+            log(f"  🚫 지수 국면 OFF (지수 {idx_chg:+.2f}% < {self.regime_min_chg}%) "
+                f"— 신규 매수 중단")
+            return
         for r in candidates[:room]:
             sym = r["symbol"]
             limit = limit_price("buy", r["price"], self.buy_band_bps)
