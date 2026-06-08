@@ -157,6 +157,7 @@ class SurgeBot:
 
         self._reconcile_buys(held, now)
         self._reconcile_sells(held, now)
+        self._cleanup_vanished(held, now)
         self._check_exits(held, now)
         self._enter_new(now)
 
@@ -177,19 +178,29 @@ class SurgeBot:
         for sym, meta in list(self.pending_buys.items()):
             if sym in held and held[sym]["qty"] > 0:
                 h = held[sym]
-                tid = self.store.open_trade({
-                    "symbol": sym, "name": meta["name"], "market": "",
-                    "entry_ts": now.strftime("%Y-%m-%d %H:%M:%S"),
-                    "entry_price": h["avg_price"], "qty": h["qty"],
-                    "entry_rate": meta["entry_rate"], "entry_volume": meta["volume"]})
+                # 주문때 만든 임시기록을 실제 체결가/수량으로 갱신
+                self.store.update_trade_fill(meta["trade_id"], h["avg_price"], h["qty"])
                 self.positions[sym] = {
-                    "trade_id": tid, "entry_price": h["avg_price"], "peak": h["avg_price"],
-                    "qty": h["qty"], "entry_ts": now, "name": meta["name"]}
+                    "trade_id": meta["trade_id"], "entry_price": h["avg_price"],
+                    "peak": h["avg_price"], "qty": h["qty"], "entry_ts": now,
+                    "name": meta["name"]}
                 log(f"  ✅ 진입체결: {meta['name']}({sym}) {h['qty']}주 @ {h['avg_price']:,.0f}원")
                 del self.pending_buys[sym]
             elif (now - meta["ts"]).total_seconds() > 120:
-                log(f"  ⏳ 미체결 매수 추적 종료: {meta['name']}({sym})")
+                # 미체결 → 임시기록 삭제(주문이 안 잡힘)
+                self.store.delete_trade(meta["trade_id"])
+                log(f"  ⏳ 미체결 매수 취소: {meta['name']}({sym})")
                 del self.pending_buys[sym]
+
+    def _cleanup_vanished(self, held: dict, now: datetime) -> None:
+        """추적 중인 포지션이 보유에도 없고 매도대기도 아니면 정리한다.
+        (재시작 후 외부청산/미체결 잔재). 학습데이터 오염 방지 위해 행 삭제."""
+        for sym, pos in list(self.positions.items()):
+            if sym in held or sym in self.pending_sells:
+                continue
+            self.store.delete_trade(pos["trade_id"])
+            log(f"  🧹 미보유 포지션 정리(외부청산/미체결): {pos['name']}({sym})")
+            self.positions.pop(sym, None)
 
     def _reconcile_sells(self, held: dict, now: datetime) -> None:
         for sym, meta in list(self.pending_sells.items()):
@@ -269,8 +280,15 @@ class SurgeBot:
                 continue
             try:
                 self.dom.buy(sym, qty, limit)
+                # 주문 즉시 기록(임시가=지정가). 체결되면 _reconcile_buys가 실제가로 갱신.
+                # 이렇게 해야 --once/재시작에도 봇이 자기 포지션을 잃지 않는다.
+                tid = self.store.open_trade({
+                    "symbol": sym, "name": r["name"], "market": "",
+                    "entry_ts": now.strftime("%Y-%m-%d %H:%M:%S"),
+                    "entry_price": limit, "qty": qty,
+                    "entry_rate": r["rate"], "entry_volume": r["volume"]})
                 self.pending_buys[sym] = {
-                    "entry_rate": r["rate"], "volume": r["volume"],
+                    "trade_id": tid, "entry_rate": r["rate"], "volume": r["volume"],
                     "name": r["name"], "ts": now}
                 log(f"  📥 매수주문: {r['name']}({sym}) +{r['rate']:.1f}% "
                     f"@ {r['price']:,}원 x{qty} → 지정가{limit:,}")
