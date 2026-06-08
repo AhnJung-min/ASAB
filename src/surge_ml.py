@@ -39,15 +39,20 @@ from .data.store import DataStore
 MODEL_PATH = Path("data") / "surge_model.pkl"
 
 # 오프라인(스캔)·온라인(라이브) 양쪽에서 동일하게 계산 가능한 피처만 사용한다.
-FEATURES = ["rate", "log_volume", "log_price", "hour", "weekday", "rank", "n_scan"]
+# ob_imbalance(호가 잔량 임밸런스)는 단타 핵심 피처(상위 후보만 수집 → 없으면 NaN).
+FEATURES = ["rate", "log_volume", "log_price", "hour", "weekday", "rank",
+            "n_scan", "ob_imbalance"]
 
 MIN_SAMPLES = 300        # 이만큼 안 모이면 학습 거부(과적합 방지)
 DEFAULT_HORIZON_MIN = 30
+# 왕복 거래비용(매수수수료+매도수수료+거래세+슬리피지) 근사. forward-return 라벨에서
+# 차감해 '진짜 수익'으로 학습한다(시뮬 수익이 실전에서 녹는 함정 방지).
+DEFAULT_COST_BPS = 40.0
 _TOL = timedelta(seconds=120)   # forward 가격 매칭 허용오차(폴링 30s 기준)
 
 
-def feat_row(rate: float, volume: float, price: float,
-             rank: int | None, n_scan: int, t: datetime) -> dict[str, float]:
+def feat_row(rate: float, volume: float, price: float, rank: int | None,
+             n_scan: int, t: datetime, ob_imbalance: float | None = None) -> dict[str, float]:
     """피처 한 행. 라이브 후보와 과거 스캔이 같은 식으로 만들어져야 한다."""
     return {
         "rate": float(rate),
@@ -57,6 +62,7 @@ def feat_row(rate: float, volume: float, price: float,
         "weekday": float(t.weekday()),
         "rank": float(rank) if rank else 999.0,
         "n_scan": float(n_scan),
+        "ob_imbalance": float(ob_imbalance) if ob_imbalance is not None else float("nan"),
     }
 
 
@@ -76,9 +82,10 @@ def _forward_price(timeline: list[tuple[datetime, float]],
     return best[1] if best else None
 
 
-def build_scan_dataset(store: DataStore, horizon_min: int = DEFAULT_HORIZON_MIN
-                       ) -> list[dict[str, Any]]:
-    """surge_scan → forward-return 라벨 데이터셋."""
+def build_scan_dataset(store: DataStore, horizon_min: int = DEFAULT_HORIZON_MIN,
+                       cost_bps: float = DEFAULT_COST_BPS) -> list[dict[str, Any]]:
+    """surge_scan → forward-return 라벨 데이터셋(비용 차감한 순수익 라벨)."""
+    obmap = store.orderbook_map()
     rows = store.conn.execute(
         "SELECT ts,symbol,name,price,rate,volume,rank FROM surge_scan ORDER BY ts"
     ).fetchall()
@@ -108,9 +115,12 @@ def build_scan_dataset(store: DataStore, horizon_min: int = DEFAULT_HORIZON_MIN
         fp = _forward_price(timeline[x["symbol"]], x["t"] + horizon)
         if fp is None:
             continue  # N분 뒤 가격을 못 찾음(상위권 이탈 등) → 라벨 불가
-        fwd = fp / x["price"] - 1.0
-        row = feat_row(x["rate"], x["volume"], x["price"], x["rank"], nscan[x["t"]], x["t"])
-        row.update(fwd_ret=fwd, symbol=x["symbol"], ts=x["t"].strftime("%Y-%m-%d %H:%M:%S"))
+        fwd = fp / x["price"] - 1.0 - cost_bps / 10000.0   # 왕복 비용 차감(정직)
+        ts_str = x["t"].strftime("%Y-%m-%d %H:%M:%S")
+        ob = obmap.get((ts_str, x["symbol"]))
+        row = feat_row(x["rate"], x["volume"], x["price"], x["rank"],
+                       nscan[x["t"]], x["t"], ob)
+        row.update(fwd_ret=fwd, symbol=x["symbol"], ts=ts_str)
         out.append(row)
     return out
 
@@ -127,7 +137,7 @@ def build_trade_dataset(store: DataStore) -> list[dict[str, Any]]:
         except (TypeError, ValueError):
             continue
         row = feat_row(r["entry_rate"], r["entry_volume"] or 0, r["entry_price"],
-                       r["entry_rank"], r["entry_nscan"] or 1, t)
+                       r["entry_rank"], r["entry_nscan"] or 1, t, r["entry_ob_imbalance"])
         row.update(pnl_pct=(r["pnl_pct"] or 0) / 100.0,
                    win=1 if r["reason"] == "익절" else 0, name=r["name"])
         out.append(row)
@@ -146,12 +156,13 @@ def _ic(y_true: list[float], y_pred: list[float]) -> float:
 
 
 def train(store: DataStore, horizon_min: int = DEFAULT_HORIZON_MIN,
-          min_samples: int = MIN_SAMPLES) -> dict[str, Any]:
+          min_samples: int = MIN_SAMPLES, cost_bps: float = DEFAULT_COST_BPS
+          ) -> dict[str, Any]:
     """스캔 데이터로 학습. 표본 부족 시 거부. 시간순 홀드아웃으로 OOS 점검."""
     import lightgbm as lgb
     import numpy as np
 
-    ds = build_scan_dataset(store, horizon_min)
+    ds = build_scan_dataset(store, horizon_min, cost_bps)
     if len(ds) < min_samples:
         return {"error": f"학습 데이터 부족: 라벨 {len(ds)}개 < 최소 {min_samples}개. "
                          f"봇을 더 돌려 데이터를 쌓으세요(과적합 방지 게이트)."}
@@ -169,9 +180,10 @@ def train(store: DataStore, horizon_min: int = DEFAULT_HORIZON_MIN,
 
     # 전체로 최종 학습·저장
     model = lgb.LGBMRegressor(**params).fit(X, y)
-    meta = {"rows": len(ds), "horizon_min": horizon_min,
+    ob_cov = sum(1 for r in ds if r["ob_imbalance"] == r["ob_imbalance"]) / len(ds)
+    meta = {"rows": len(ds), "horizon_min": horizon_min, "cost_bps": cost_bps,
             "span": (ds[0]["ts"], ds[-1]["ts"]), "oos_ic": ic,
-            "mean_fwd": float(y.mean())}
+            "mean_fwd_net": float(y.mean()), "ob_coverage": ob_cov}
     MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(MODEL_PATH, "wb") as f:
         pickle.dump({"model": model, "features": FEATURES, "meta": meta}, f)
@@ -192,7 +204,8 @@ def score_candidates(bundle: dict, candidates: list[dict[str, Any]],
     t = t or datetime.now()
     model, feats = bundle["model"], bundle["features"]
     for c in candidates:
-        f = feat_row(c["rate"], c["volume"], c["price"], c.get("rank"), n_scan, t)
+        f = feat_row(c["rate"], c["volume"], c["price"], c.get("rank"), n_scan, t,
+                     c.get("ob_imbalance"))
         X = np.array([[f[k] for k in feats]], dtype=float)
         c["ml_score"] = float(model.predict(X)[0])
 
@@ -203,10 +216,12 @@ def main() -> None:
     ap.add_argument("--horizon", type=int, default=DEFAULT_HORIZON_MIN,
                     help="forward-return 지평(분)")
     ap.add_argument("--min-samples", type=int, default=MIN_SAMPLES)
+    ap.add_argument("--cost-bps", type=float, default=DEFAULT_COST_BPS,
+                    help="왕복 거래비용(bp) — forward 라벨에서 차감")
     args = ap.parse_args()
 
     store = DataStore()
-    scan_ds = build_scan_dataset(store, args.horizon)
+    scan_ds = build_scan_dataset(store, args.horizon, args.cost_bps)
     trade_ds = build_trade_dataset(store)
     n_scan_raw = store.conn.execute("SELECT COUNT(*) c FROM surge_scan").fetchone()["c"]
     n_days = store.conn.execute(
@@ -220,7 +235,8 @@ def main() -> None:
 
     if args.train:
         print("\n모델 학습 중...", flush=True)
-        meta = train(store, horizon_min=args.horizon, min_samples=args.min_samples)
+        meta = train(store, horizon_min=args.horizon, min_samples=args.min_samples,
+                     cost_bps=args.cost_bps)
         if "error" in meta:
             print("  ⚠️ " + meta["error"])
         else:
@@ -228,7 +244,8 @@ def main() -> None:
             ic_txt = f"{ic:+.3f}" if ic == ic else "N/A(표본부족)"
             print(f"  ✅ 저장: {MODEL_PATH}")
             print(f"     학습 {meta['rows']:,}행 · OOS IC {ic_txt} · "
-                  f"평균 {args.horizon}분수익 {meta['mean_fwd']*100:+.2f}%")
+                  f"평균 순수익(비용{meta['cost_bps']:.0f}bp차감) "
+                  f"{meta['mean_fwd_net']*100:+.2f}% · 호가커버리지 {meta['ob_coverage']*100:.0f}%")
             print("     ※ IC가 0 근처면 아직 예측력 없음 — 데이터 더 필요")
     else:
         if len(scan_ds) < args.min_samples:

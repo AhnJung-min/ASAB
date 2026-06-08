@@ -174,10 +174,19 @@ CREATE TABLE IF NOT EXISTS surge_trade (
     entry_ts TEXT, entry_price REAL, qty INTEGER,
     entry_rate REAL, entry_volume INTEGER,
     entry_rank INTEGER, entry_nscan INTEGER,   -- 진입 시점 순위·동시급등 종목수(학습 피처)
+    entry_ob_imbalance REAL,                   -- 진입 시점 호가 잔량 임밸런스(학습 피처)
     exit_ts TEXT, exit_price REAL,
     pnl REAL, pnl_pct REAL, reason TEXT, hold_sec INTEGER,
     status TEXT NOT NULL DEFAULT 'open'   -- open | closed
 );
+-- 호가 잔량 임밸런스 스냅샷 (상위 후보만 캡처, 호출제한 절약). 단타 핵심 피처.
+CREATE TABLE IF NOT EXISTS surge_orderbook (
+    ts        TEXT NOT NULL,
+    symbol    TEXT,
+    total_bid INTEGER, total_ask INTEGER,
+    imbalance REAL, spread_bps REAL
+);
+CREATE INDEX IF NOT EXISTS idx_surge_ob ON surge_orderbook(symbol, ts);
 """
 
 
@@ -225,7 +234,8 @@ class DataStore:
         # 학습 피처 컬럼 추가(구 DB 보강) — 기존 데이터 보존
         self._add_columns("surge_scan", {"rank": "INTEGER"})
         self._add_columns("surge_trade",
-                          {"entry_rank": "INTEGER", "entry_nscan": "INTEGER"})
+                          {"entry_rank": "INTEGER", "entry_nscan": "INTEGER",
+                           "entry_ob_imbalance": "REAL"})
 
     def _add_columns(self, table: str, cols: dict[str, str]) -> None:
         cur = self.conn.execute(
@@ -531,13 +541,28 @@ class DataStore:
         cur = self.conn.execute(
             "INSERT INTO surge_trade "
             "(symbol,name,market,entry_ts,entry_price,qty,entry_rate,entry_volume,"
-            "entry_rank,entry_nscan,status) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,'open')",
+            "entry_rank,entry_nscan,entry_ob_imbalance,status) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,'open')",
             (t["symbol"], t["name"], t.get("market", ""), t["entry_ts"],
              t["entry_price"], t["qty"], t.get("entry_rate"), t.get("entry_volume"),
-             t.get("entry_rank"), t.get("entry_nscan")))
+             t.get("entry_rank"), t.get("entry_nscan"), t.get("entry_ob_imbalance")))
         self.conn.commit()
         return cur.lastrowid
+
+    def save_surge_orderbook(self, ts: str, rows: Iterable[dict[str, Any]]) -> int:
+        data = [(ts, r["symbol"], r.get("total_bid"), r.get("total_ask"),
+                 r.get("imbalance"), r.get("spread_bps")) for r in rows]
+        self.conn.executemany(
+            "INSERT INTO surge_orderbook (ts,symbol,total_bid,total_ask,imbalance,spread_bps) "
+            "VALUES (?,?,?,?,?,?)", data)
+        self.conn.commit()
+        return len(data)
+
+    def orderbook_map(self) -> dict[tuple[str, str], float]:
+        """(ts, symbol) → imbalance. 학습 데이터셋에서 스캔행에 호가 임밸런스 조인용."""
+        return {(r["ts"], r["symbol"]): r["imbalance"]
+                for r in self.conn.execute(
+                    "SELECT ts,symbol,imbalance FROM surge_orderbook")}
 
     def update_trade_fill(self, trade_id: int, entry_price: float, qty: int) -> None:
         """주문 시점 임시기록을 실제 체결가/수량으로 갱신."""
