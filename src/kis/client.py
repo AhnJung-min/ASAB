@@ -16,6 +16,8 @@ from .config import Config
 
 # 초당 거래건수 초과 에러코드
 _RATE_LIMIT_CODE = "EGW00201"
+# 토큰 무효/만료 에러코드(서버가 토큰 거부) → 재발급 후 재시도
+_TOKEN_ERR_CODES = {"EGW00121", "EGW00123", "EGW00105"}
 # 요청 간 최소 간격(초). 모의투자는 보수적으로.
 _MIN_INTERVAL = 0.35
 # 한도 초과 시 최대 재시도 횟수
@@ -91,6 +93,11 @@ class KISClient:
             try:
                 return self._parse(do_request())
             except KISApiError as e:
+                if e.code in _TOKEN_ERR_CODES:
+                    # 토큰 거부 → 무효화 후 재시도(다음 do_request 가 새 토큰으로 헤더 구성)
+                    self.tokens.invalidate()
+                    last_err = e
+                    continue
                 if e.code != _RATE_LIMIT_CODE:
                     raise
                 last_err = e

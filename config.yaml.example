@@ -101,8 +101,10 @@ surge:
   take_profit_pct: 3.0    # 익절(+%)
   stop_loss_pct: -2.0     # 손절(−%, 음수로)
   trailing_pct: -2.0      # 트레일링스톱(고점 대비 −%, 음수로)
-  buy_band_bps: 30        # 매수 지정가 상한(현재가 대비 bps)
+  buy_band_bps: 30        # 매수 지정가 상한(현재가 대비 bps) — entry_order_type=limit 일 때
   sell_band_bps: 50       # 매도 지정가(체결우선 위해 넓게)
+  entry_order_type: "limit"  # 진입 주문: limit(지정가) / market(시장가) / best(최유리지정가)
+                             # 단타 체결 보장이 중요하면 market·best. 단 슬리피지 감수.
   quote_market: "UN"      # 시세: UN통합(KRX+NXT) / J KRX / NX 넥스트레이드
   poll_interval_sec: 30   # 폴링 주기(초). 모의 호출제한 고려해 너무 짧게 금지
   ob_capture_top: 8       # 호가 잔량 임밸런스 수집할 상위 후보 수(호출제한↔피처품질)
