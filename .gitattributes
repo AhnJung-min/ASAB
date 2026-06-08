@@ -1,0 +1,2 @@
+# 배치 파일은 cmd.exe가 CRLF 줄바꿈을 요구한다(LF면 명령 오파싱).
+*.bat text eol=crlf
