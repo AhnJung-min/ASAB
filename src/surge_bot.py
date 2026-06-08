@@ -93,6 +93,7 @@ class SurgeBot:
         self.sell_band_bps = float(s.get("sell_band_bps", 50))  # 매도 체결우선 하한
         self.quote_market = str(s.get("quote_market", "UN")).upper()  # UN통합/J KRX/NX
         self.interval = int(s.get("poll_interval_sec", 30))
+        self.ob_capture_top = int(s.get("ob_capture_top", 8))  # 호가 임밸런스 수집할 상위 후보수
         self.use_model = bool(s.get("use_model", True))       # 학습모델로 후보 점수화
         self.min_pred_ret = float(s.get("min_pred_ret", -1.0))  # 예측수익 이 미만 후보 제외(-1=제외안함)
         self._model_bundle: dict | None = None
@@ -142,6 +143,21 @@ class SurgeBot:
                 log(f"  🤖 ML 모델 로드(학습 {meta.get('rows','?')}행, "
                     f"OOS IC {meta.get('oos_ic')})")
         return self._model_bundle
+
+    def _capture_orderbook(self, candidates: list[dict], now: datetime) -> None:
+        """상위 후보의 호가 잔량 임밸런스 수집(호출제한 위해 상위 N개만).
+        후보에 ob_imbalance 부착 + surge_orderbook 적재(학습 피처). 단타 핵심."""
+        top = candidates[: self.ob_capture_top]
+        obs = []
+        for c in top:
+            try:
+                ob = self.dom.order_book(c["symbol"])
+            except KISApiError:
+                continue
+            c["ob_imbalance"] = ob["imbalance"]
+            obs.append({"symbol": c["symbol"], **ob})
+        if obs:
+            self.store.save_surge_orderbook(now.strftime("%Y-%m-%d %H:%M:%S"), obs)
 
     def _apply_model(self, candidates: list[dict], n_scan: int) -> None:
         """모델이 있으면 후보에 예측수익 점수를 매겨 재정렬하고 하한 미만은 제외."""
@@ -294,6 +310,7 @@ class SurgeBot:
         if scanned:
             self.store.save_surge_scan(now.strftime("%Y-%m-%d %H:%M:%S"), scanned)
         candidates = self.filter_candidates(scanned)
+        self._capture_orderbook(candidates, now)     # 상위 후보 호가 임밸런스 수집·부착
         self._apply_model(candidates, len(scanned))  # 모델 있으면 ML점수로 재정렬·필터
         if self.dry_run:
             tag = " · ML점수순" if self._model_bundle and self.use_model else ""
@@ -321,7 +338,8 @@ class SurgeBot:
                     "entry_ts": now.strftime("%Y-%m-%d %H:%M:%S"),
                     "entry_price": limit, "qty": qty,
                     "entry_rate": r["rate"], "entry_volume": r["volume"],
-                    "entry_rank": r.get("rank"), "entry_nscan": len(scanned)})
+                    "entry_rank": r.get("rank"), "entry_nscan": len(scanned),
+                    "entry_ob_imbalance": r.get("ob_imbalance")})
                 self.pending_buys[sym] = {
                     "trade_id": tid, "entry_rate": r["rate"], "volume": r["volume"],
                     "name": r["name"], "ts": now}

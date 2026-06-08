@@ -28,6 +28,29 @@ class DomesticStock:
         )
         return int(data["output"]["stck_prpr"])
 
+    def order_book(self, symbol: str, market: str = "J") -> dict[str, Any]:
+        """호가창(매수/매도 잔량) 조회. 단타 핵심 피처=잔량 임밸런스.
+
+        반환: {bid1, ask1, total_bid, total_ask, imbalance, spread_bps}
+          imbalance = (총매수잔량-총매도잔량)/(총매수+총매도) ∈ [-1,1]
+                      양수=매수세 우위(상승압력). (호가 TR FHKST01010200)
+        """
+        d = self.c.get(
+            "/uapi/domestic-stock/v1/quotations/inquire-asking-price-exp-ccn",
+            tr_id="FHKST01010200",  # 시세계 → 모의/실전 동일
+            params={"FID_COND_MRKT_DIV_CODE": market, "FID_INPUT_ISCD": symbol},
+        )
+        o = d.get("output1", {}) or {}
+        tb = int(o.get("total_bidp_rsqn", 0) or 0)
+        ta = int(o.get("total_askp_rsqn", 0) or 0)
+        bid1 = int(o.get("bidp1", 0) or 0)
+        ask1 = int(o.get("askp1", 0) or 0)
+        denom = tb + ta
+        imbalance = (tb - ta) / denom if denom > 0 else 0.0
+        spread_bps = ((ask1 - bid1) / bid1 * 10000) if bid1 > 0 else 0.0
+        return {"bid1": bid1, "ask1": ask1, "total_bid": tb, "total_ask": ta,
+                "imbalance": imbalance, "spread_bps": spread_bps}
+
     # --- 순위(스캔) ---------------------------------------------------------
     def top_gainers(self, top: int = 30, *, gubn: str = "up",
                     market: str = "0000", min_price: int = 0,
