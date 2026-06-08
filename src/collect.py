@@ -93,6 +93,10 @@ def run(source: str, top: int, months: int, limit: int | None,
     if not universe:
         store.close()
         return
+    # 벤치마크(KODEX200)는 ETF라 master 유니버스에서 빠짐 → 시장국면·상대강도용으로 항상 포함
+    BENCHMARK = "069500"
+    if not any(u["symbol"] == BENCHMARK for u in universe):
+        universe.append({"symbol": BENCHMARK, "name": "KODEX200(벤치마크)"})
     mode_txt = "증분 업데이트(최근 빠진 구간만)" if update else f"{months}개월 백필"
     log(f"  대상 {len(universe)}종목 · 일봉 {mode_txt} 시작")
 
