@@ -162,15 +162,18 @@ CREATE TABLE IF NOT EXISTS live_position (
 CREATE TABLE IF NOT EXISTS surge_scan (
     ts     TEXT NOT NULL,
     market TEXT, symbol TEXT, name TEXT,
-    price  REAL, rate REAL, volume INTEGER
+    price  REAL, rate REAL, volume INTEGER,
+    rank   INTEGER          -- 등락률 순위(학습 피처)
 );
 CREATE INDEX IF NOT EXISTS idx_surge_scan_ts ON surge_scan(ts);
+CREATE INDEX IF NOT EXISTS idx_surge_scan_sym ON surge_scan(symbol, ts);
 -- 급등주 매매 기록 (진입~청산, 원화). "어떤 급등 패턴이 익절로 이어지나" 학습데이터.
 CREATE TABLE IF NOT EXISTS surge_trade (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     symbol TEXT, name TEXT, market TEXT,
     entry_ts TEXT, entry_price REAL, qty INTEGER,
     entry_rate REAL, entry_volume INTEGER,
+    entry_rank INTEGER, entry_nscan INTEGER,   -- 진입 시점 순위·동시급등 종목수(학습 피처)
     exit_ts TEXT, exit_price REAL,
     pnl REAL, pnl_pct REAL, reason TEXT, hold_sec INTEGER,
     status TEXT NOT NULL DEFAULT 'open'   -- open | closed
@@ -219,6 +222,21 @@ class DataStore:
                 if "market" not in cols:  # 구 스키마(exchange)
                     self.conn.execute(f"DROP TABLE {tbl}")
                     self.conn.commit()
+        # 학습 피처 컬럼 추가(구 DB 보강) — 기존 데이터 보존
+        self._add_columns("surge_scan", {"rank": "INTEGER"})
+        self._add_columns("surge_trade",
+                          {"entry_rank": "INTEGER", "entry_nscan": "INTEGER"})
+
+    def _add_columns(self, table: str, cols: dict[str, str]) -> None:
+        cur = self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
+        if not cur.fetchone():
+            return
+        existing = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")}
+        for name, decl in cols.items():
+            if name not in existing:
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+        self.conn.commit()
 
     def close(self) -> None:
         self.conn.close()
@@ -502,20 +520,22 @@ class DataStore:
     # --- 급등주 스캔/매매(국내 단타 트랙) ---------------------------------
     def save_surge_scan(self, ts: str, rows: Iterable[dict[str, Any]]) -> int:
         data = [(ts, r.get("market", ""), r["symbol"], r["name"],
-                 r["price"], r["rate"], r["volume"]) for r in rows]
+                 r["price"], r["rate"], r["volume"], r.get("rank")) for r in rows]
         self.conn.executemany(
-            "INSERT INTO surge_scan (ts,market,symbol,name,price,rate,volume) "
-            "VALUES (?,?,?,?,?,?,?)", data)
+            "INSERT INTO surge_scan (ts,market,symbol,name,price,rate,volume,rank) "
+            "VALUES (?,?,?,?,?,?,?,?)", data)
         self.conn.commit()
         return len(data)
 
     def open_trade(self, t: dict[str, Any]) -> int:
         cur = self.conn.execute(
             "INSERT INTO surge_trade "
-            "(symbol,name,market,entry_ts,entry_price,qty,entry_rate,entry_volume,status) "
-            "VALUES (?,?,?,?,?,?,?,?,'open')",
+            "(symbol,name,market,entry_ts,entry_price,qty,entry_rate,entry_volume,"
+            "entry_rank,entry_nscan,status) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,'open')",
             (t["symbol"], t["name"], t.get("market", ""), t["entry_ts"],
-             t["entry_price"], t["qty"], t.get("entry_rate"), t.get("entry_volume")))
+             t["entry_price"], t["qty"], t.get("entry_rate"), t.get("entry_volume"),
+             t.get("entry_rank"), t.get("entry_nscan")))
         self.conn.commit()
         return cur.lastrowid
 

@@ -102,3 +102,8 @@ surge:
   sell_band_bps: 50       # 매도 지정가(체결우선 위해 넓게)
   quote_market: "UN"      # 시세: UN통합(KRX+NXT) / J KRX / NX 넥스트레이드
   poll_interval_sec: 30   # 폴링 주기(초). 모의 호출제한 고려해 너무 짧게 금지
+  # --- 학습 모델(선택) — data/surge_model.pkl 있을 때만 작동 ---
+  # 단타 데이터를 쌓아 학습: python -m src.surge_ml --train (데이터 충분 시)
+  # 모델이 있으면 매수 후보를 '예측 N분 수익'으로 재정렬한다. 없으면 등락률순.
+  use_model: true         # 모델로 후보 점수화/재정렬
+  min_pred_ret: -1.0      # 예측수익 이 값 미만 후보 제외(-1=제외안함, 0=음수예측 제외)
