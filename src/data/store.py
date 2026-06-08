@@ -519,6 +519,18 @@ class DataStore:
         self.conn.commit()
         return cur.lastrowid
 
+    def update_trade_fill(self, trade_id: int, entry_price: float, qty: int) -> None:
+        """주문 시점 임시기록을 실제 체결가/수량으로 갱신."""
+        self.conn.execute(
+            "UPDATE surge_trade SET entry_price=?, qty=? WHERE id=?",
+            (entry_price, qty, trade_id))
+        self.conn.commit()
+
+    def delete_trade(self, trade_id: int) -> None:
+        """미체결 취소 등으로 무효가 된 행 제거."""
+        self.conn.execute("DELETE FROM surge_trade WHERE id=?", (trade_id,))
+        self.conn.commit()
+
     def close_trade(self, trade_id: int, exit_ts: str, exit_price: float,
                     pnl: float, pnl_pct: float, reason: str, hold_sec: int) -> None:
         self.conn.execute(
