@@ -51,6 +51,34 @@ class DomesticStock:
         return {"bid1": bid1, "ask1": ask1, "total_bid": tb, "total_ask": ta,
                 "imbalance": imbalance, "spread_bps": spread_bps}
 
+    def minute_bars(self, symbol: str, to_hour: str = "153000",
+                    market: str = "J") -> list[dict[str, Any]]:
+        """당일 분봉 조회. to_hour(HHMMSS) 기준 과거로 최대 ~30봉 반환(최신순).
+
+        하루 전체는 to_hour 를 이전 봉 시각으로 당기며 페이징한다(collect_minute).
+        반환: [{date(YYYYMMDD), time(HHMMSS), open, high, low, close, volume}, ...]
+        (당일분봉 FHKST03010200, 시세계 → 모의/실전 동일)
+        """
+        d = self.c.get(
+            "/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice",
+            tr_id="FHKST03010200",
+            params={"FID_ETC_CLS_CODE": "", "FID_COND_MRKT_DIV_CODE": market,
+                    "FID_INPUT_ISCD": symbol, "FID_INPUT_HOUR_1": to_hour,
+                    "FID_PW_DATA_INCU_YN": "N"},
+        )
+        out: list[dict[str, Any]] = []
+        for r in d.get("output2", []) or []:
+            try:
+                out.append({
+                    "date": r["stck_bsop_date"], "time": r["stck_cntg_hour"],
+                    "open": float(r["stck_oprc"]), "high": float(r["stck_hgpr"]),
+                    "low": float(r["stck_lwpr"]), "close": float(r["stck_prpr"]),
+                    "volume": int(r["cntg_vol"]),
+                })
+            except (KeyError, ValueError):
+                continue
+        return out
+
     # --- 순위(스캔) ---------------------------------------------------------
     def top_gainers(self, top: int = 30, *, gubn: str = "up",
                     market: str = "0000", min_price: int = 0,

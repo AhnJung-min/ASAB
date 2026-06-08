@@ -66,6 +66,17 @@ def feat_row(rate: float, volume: float, price: float, rank: int | None,
     }
 
 
+def _minute_forward_price(mtl: dict, symbol: str, target: datetime) -> float | None:
+    """분봉에서 target 시각 이후 첫 봉의 종가(생존편향 없는 forward price)."""
+    series = mtl.get((symbol, target.strftime("%Y%m%d")))
+    if not series:
+        return None
+    tt = target.strftime("%H%M%S")
+    times = [x[0] for x in series]
+    i = bisect_left(times, tt)
+    return series[i][1] if i < len(series) else None
+
+
 def _forward_price(timeline: list[tuple[datetime, float]],
                    target: datetime) -> float | None:
     """symbol 가격 타임라인에서 target 시각에 가장 가까운 가격(허용오차 내)."""
@@ -84,8 +95,12 @@ def _forward_price(timeline: list[tuple[datetime, float]],
 
 def build_scan_dataset(store: DataStore, horizon_min: int = DEFAULT_HORIZON_MIN,
                        cost_bps: float = DEFAULT_COST_BPS) -> list[dict[str, Any]]:
-    """surge_scan → forward-return 라벨 데이터셋(비용 차감한 순수익 라벨)."""
+    """surge_scan → forward-return 라벨 데이터셋(비용 차감한 순수익 라벨).
+
+    forward price 는 분봉(생존편향 없음) 우선, 없으면 스캔 스냅샷으로 폴백.
+    """
     obmap = store.orderbook_map()
+    mtl = store.minute_timeline()
     rows = store.conn.execute(
         "SELECT ts,symbol,name,price,rate,volume,rank FROM surge_scan ORDER BY ts"
     ).fetchall()
@@ -112,15 +127,20 @@ def build_scan_dataset(store: DataStore, horizon_min: int = DEFAULT_HORIZON_MIN,
     horizon = timedelta(minutes=horizon_min)
     out: list[dict[str, Any]] = []
     for x in recs:
-        fp = _forward_price(timeline[x["symbol"]], x["t"] + horizon)
+        target = x["t"] + horizon
+        fp = _minute_forward_price(mtl, x["symbol"], target)   # 분봉 우선(편향 없음)
+        src = "minute"
         if fp is None:
-            continue  # N분 뒤 가격을 못 찾음(상위권 이탈 등) → 라벨 불가
+            fp = _forward_price(timeline[x["symbol"]], target)  # 폴백: 스캔 스냅샷
+            src = "scan"
+        if fp is None:
+            continue  # N분 뒤 가격을 못 찾음 → 라벨 불가
         fwd = fp / x["price"] - 1.0 - cost_bps / 10000.0   # 왕복 비용 차감(정직)
         ts_str = x["t"].strftime("%Y-%m-%d %H:%M:%S")
         ob = obmap.get((ts_str, x["symbol"]))
         row = feat_row(x["rate"], x["volume"], x["price"], x["rank"],
                        nscan[x["t"]], x["t"], ob)
-        row.update(fwd_ret=fwd, symbol=x["symbol"], ts=ts_str)
+        row.update(fwd_ret=fwd, symbol=x["symbol"], ts=ts_str, src=src)
         out.append(row)
     return out
 
@@ -181,9 +201,11 @@ def train(store: DataStore, horizon_min: int = DEFAULT_HORIZON_MIN,
     # 전체로 최종 학습·저장
     model = lgb.LGBMRegressor(**params).fit(X, y)
     ob_cov = sum(1 for r in ds if r["ob_imbalance"] == r["ob_imbalance"]) / len(ds)
+    min_cov = sum(1 for r in ds if r.get("src") == "minute") / len(ds)
     meta = {"rows": len(ds), "horizon_min": horizon_min, "cost_bps": cost_bps,
             "span": (ds[0]["ts"], ds[-1]["ts"]), "oos_ic": ic,
-            "mean_fwd_net": float(y.mean()), "ob_coverage": ob_cov}
+            "mean_fwd_net": float(y.mean()), "ob_coverage": ob_cov,
+            "minute_coverage": min_cov}
     MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(MODEL_PATH, "wb") as f:
         pickle.dump({"model": model, "features": FEATURES, "meta": meta}, f)
@@ -227,9 +249,13 @@ def main() -> None:
     n_days = store.conn.execute(
         "SELECT COUNT(DISTINCT substr(ts,1,10)) c FROM surge_scan").fetchone()["c"]
 
+    n_min = sum(1 for r in scan_ds if r.get("src") == "minute")
+    n_mbar = store.conn.execute("SELECT COUNT(*) c FROM minute_bar").fetchone()["c"]
     print("=== 단타 학습 데이터 현황 ===")
     print(f"  스캔 원천: {n_scan_raw:,}행 ({n_days}일치)")
-    print(f"  라벨 가능(스캔 forward {args.horizon}분): {len(scan_ds):,}개")
+    print(f"  분봉: {n_mbar:,}봉 저장")
+    print(f"  라벨 가능(forward {args.horizon}분): {len(scan_ds):,}개 "
+          f"(분봉기반 {n_min:,}·스캔폴백 {len(scan_ds)-n_min:,})")
     print(f"  실제 매매(검증용, 청산완료): {len(trade_ds)}건")
     print(f"  학습 게이트: 최소 {args.min_samples}개 필요")
 

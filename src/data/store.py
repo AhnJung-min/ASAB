@@ -187,6 +187,13 @@ CREATE TABLE IF NOT EXISTS surge_orderbook (
     imbalance REAL, spread_bps REAL
 );
 CREATE INDEX IF NOT EXISTS idx_surge_ob ON surge_orderbook(symbol, ts);
+-- 분봉(EOD 수집). 스캔 종목의 당일 1분봉 → 라벨 생존편향 제거(이탈종목도 추적).
+CREATE TABLE IF NOT EXISTS minute_bar (
+    symbol TEXT, date TEXT, time TEXT,      -- date=YYYYMMDD, time=HHMMSS
+    open REAL, high REAL, low REAL, close REAL, volume INTEGER,
+    PRIMARY KEY (symbol, date, time)
+);
+CREATE INDEX IF NOT EXISTS idx_minute_sym ON minute_bar(symbol, date, time);
 """
 
 
@@ -563,6 +570,34 @@ class DataStore:
         return {(r["ts"], r["symbol"]): r["imbalance"]
                 for r in self.conn.execute(
                     "SELECT ts,symbol,imbalance FROM surge_orderbook")}
+
+    def save_minute_bars(self, symbol: str, rows: Iterable[dict[str, Any]]) -> int:
+        data = [(symbol, r["date"], r["time"], r["open"], r["high"], r["low"],
+                 r["close"], r["volume"]) for r in rows]
+        self.conn.executemany(
+            "INSERT OR IGNORE INTO minute_bar "
+            "(symbol,date,time,open,high,low,close,volume) VALUES (?,?,?,?,?,?,?,?)", data)
+        self.conn.commit()
+        return len(data)
+
+    def minute_timeline(self) -> dict[tuple[str, str], list[tuple[str, float]]]:
+        """(symbol, date) → 시간순 [(time, close)]. 학습 forward-price 조회용."""
+        from collections import defaultdict
+        tl: dict[tuple[str, str], list[tuple[str, float]]] = defaultdict(list)
+        for r in self.conn.execute(
+                "SELECT symbol,date,time,close FROM minute_bar ORDER BY symbol,date,time"):
+            tl[(r["symbol"], r["date"])].append((r["time"], r["close"]))
+        return tl
+
+    def minute_symbols_done(self, date: str) -> set[str]:
+        """해당 날짜 분봉이 이미 저장된 종목 집합(재수집 건너뛰기용)."""
+        return {r["symbol"] for r in self.conn.execute(
+            "SELECT DISTINCT symbol FROM minute_bar WHERE date=?", (date,))}
+
+    def scan_symbols_on(self, date: str) -> list[str]:
+        """해당 날짜(YYYY-MM-DD) 스캔에 등장한 distinct 종목(분봉 수집 대상)."""
+        return [r["symbol"] for r in self.conn.execute(
+            "SELECT DISTINCT symbol FROM surge_scan WHERE substr(ts,1,10)=?", (date,))]
 
     def update_trade_fill(self, trade_id: int, entry_price: float, qty: int) -> None:
         """주문 시점 임시기록을 실제 체결가/수량으로 갱신."""
