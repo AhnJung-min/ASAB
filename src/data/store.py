@@ -158,6 +158,23 @@ CREATE TABLE IF NOT EXISTS live_position (
     opened_ts   TEXT,
     updated_ts  TEXT
 );
+-- 급등주 스캔 스냅샷 (국내 등락률 순위, 누적). 학습/분석용.
+CREATE TABLE IF NOT EXISTS surge_scan (
+    ts     TEXT NOT NULL,
+    market TEXT, symbol TEXT, name TEXT,
+    price  REAL, rate REAL, volume INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_surge_scan_ts ON surge_scan(ts);
+-- 급등주 매매 기록 (진입~청산, 원화). "어떤 급등 패턴이 익절로 이어지나" 학습데이터.
+CREATE TABLE IF NOT EXISTS surge_trade (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT, name TEXT, market TEXT,
+    entry_ts TEXT, entry_price REAL, qty INTEGER,
+    entry_rate REAL, entry_volume INTEGER,
+    exit_ts TEXT, exit_price REAL,
+    pnl REAL, pnl_pct REAL, reason TEXT, hold_sec INTEGER,
+    status TEXT NOT NULL DEFAULT 'open'   -- open | closed
+);
 """
 
 
@@ -192,6 +209,16 @@ class DataStore:
             if "liquidity" not in mcols:
                 self.conn.execute("ALTER TABLE stock_master ADD COLUMN liquidity REAL")
                 self.conn.commit()
+        # 구 surge 테이블(미국 트랙, exchange 컬럼/USD)을 국내(market/원화) 스키마로 교체.
+        # 폐기된 미국 데이터라 드롭 후 재생성한다.
+        for tbl in ("surge_trade", "surge_scan"):
+            cur = self.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (tbl,))
+            if cur.fetchone():
+                cols = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({tbl})")}
+                if "market" not in cols:  # 구 스키마(exchange)
+                    self.conn.execute(f"DROP TABLE {tbl}")
+                    self.conn.commit()
 
     def close(self) -> None:
         self.conn.close()
@@ -471,6 +498,47 @@ class DataStore:
     def delete_position(self, symbol: str) -> None:
         self.conn.execute("DELETE FROM live_position WHERE symbol=?", (symbol,))
         self.conn.commit()
+
+    # --- 급등주 스캔/매매(국내 단타 트랙) ---------------------------------
+    def save_surge_scan(self, ts: str, rows: Iterable[dict[str, Any]]) -> int:
+        data = [(ts, r.get("market", ""), r["symbol"], r["name"],
+                 r["price"], r["rate"], r["volume"]) for r in rows]
+        self.conn.executemany(
+            "INSERT INTO surge_scan (ts,market,symbol,name,price,rate,volume) "
+            "VALUES (?,?,?,?,?,?,?)", data)
+        self.conn.commit()
+        return len(data)
+
+    def open_trade(self, t: dict[str, Any]) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO surge_trade "
+            "(symbol,name,market,entry_ts,entry_price,qty,entry_rate,entry_volume,status) "
+            "VALUES (?,?,?,?,?,?,?,?,'open')",
+            (t["symbol"], t["name"], t.get("market", ""), t["entry_ts"],
+             t["entry_price"], t["qty"], t.get("entry_rate"), t.get("entry_volume")))
+        self.conn.commit()
+        return cur.lastrowid
+
+    def close_trade(self, trade_id: int, exit_ts: str, exit_price: float,
+                    pnl: float, pnl_pct: float, reason: str, hold_sec: int) -> None:
+        self.conn.execute(
+            "UPDATE surge_trade SET exit_ts=?, exit_price=?, pnl=?, pnl_pct=?, "
+            "reason=?, hold_sec=?, status='closed' WHERE id=?",
+            (exit_ts, exit_price, pnl, pnl_pct, reason, hold_sec, trade_id))
+        self.conn.commit()
+
+    def open_trades(self) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM surge_trade WHERE status='open'").fetchall()
+
+    def recent_trades(self, limit: int = 50) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM surge_trade ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+
+    def recent_surge_scans(self, limit: int = 100) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM surge_scan ORDER BY ts DESC, rate DESC LIMIT ?",
+            (limit,)).fetchall()
 
     # --- 읽기 ---------------------------------------------------------------
     def latest_date(self, symbol: str) -> str | None:

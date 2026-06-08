@@ -1,0 +1,317 @@
+"""국내 급등주 포착 + 수익실현 자동매매 (모의투자).
+
+일봉 추세 트랙(run_bot screener_rotation)과 별개인 **장중 단타 트랙**이다.
+선정=일봉으로 충분하지만 단타는 분/초 단위 실시간 신호가 필요하므로 분리한다.
+
+흐름(매 poll 주기):
+  1) 잔고 조회로 실제 보유와 동기화(체결 확인)
+  2) 보유 종목: 익절 / 손절 / 트레일링 스톱 점검 -> 매도
+  3) 빈 자리만큼: 등락률 상위 스캔 -> 필터 -> 매수
+  4) 스캔 스냅샷과 매매 기록을 SQLite(data/market.db)에 적재 (학습용)
+
+주문은 체결을 높이려 현재가 근처 지정가(KRX 호가단위)로 낸다. 체결은 다음
+주기에 잔고로 확인(reconcile)하므로 비동기 체결에도 안전하다.
+
+검증 현실: 분봉 과거데이터가 없어 일봉 백테스트처럼 못 한다. 모의계좌
+포워드로 surge_trade(학습데이터)를 쌓고, 모이면 ML로 진입 필터를 학습한다.
+
+실행:  python -m src.surge_bot              (주기 반복)
+       python -m src.surge_bot --once       (1주기만)
+       python -m src.surge_bot --dry-run    (주문 없이 스캔·신호만 — 안전 점검)
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")  # Windows 콘솔 한글 깨짐 방지
+
+import yaml
+
+from .data.store import DataStore
+from .kis.client import KISApiError, KISClient
+from .kis.config import load_config
+from .kis.domestic import DomesticStock
+from .pricing import limit_price
+
+
+def log(msg: str) -> None:
+    print(f"[{datetime.now():%H:%M:%S}] {msg}", flush=True)
+
+
+def kr_market_open(now: datetime | None = None) -> bool:
+    """국내 정규장(평일 09:00~15:30 KST) 대략 판정."""
+    now = now or datetime.now()
+    if now.weekday() >= 5:  # 토/일
+        return False
+    h = now.hour + now.minute / 60
+    return 9.0 <= h <= 15.5
+
+
+class SurgeBot:
+    def __init__(self, dry_run: bool = False):
+        cfg = load_config()
+        self.cfg = cfg
+        self.dry_run = dry_run
+        self.client = KISClient(cfg)
+        self.dom = DomesticStock(self.client)
+        self.store = DataStore()
+
+        # surge 섹션은 config.yaml 최상위에 있으므로 직접 로드
+        raw = yaml.safe_load(Path("config.yaml").read_text(encoding="utf-8"))
+        s = raw.get("surge", {}) or {}
+
+        self.market = str(s.get("market", "0000"))      # 0000전체/0001코스피/1001코스닥
+        self.scan_top = int(s.get("scan_top", 40))
+        self.min_rate = float(s.get("min_rate", 5.0))    # 최소 등락률%
+        self.max_rate = float(s.get("max_rate", 20.0))   # 상한가 추격 방지(체결 불가)
+        self.min_volume = int(s.get("min_volume", 100_000))
+        self.price_min = int(s.get("price_min", 1_000))  # 동전주 배제
+        self.price_max = int(s.get("price_max", 100_000))
+        self.max_positions = int(s.get("max_positions", 3))
+        self.order_value_krw = int(s.get("order_value_krw", 0))  # 종목당 배정금(0=order_qty)
+        self.order_qty = int(s.get("order_qty", 1))
+        self.take_profit = float(s.get("take_profit_pct", 3.0))
+        self.stop_loss = float(s.get("stop_loss_pct", -2.0))    # 음수
+        self.trailing = float(s.get("trailing_pct", -2.0))      # 음수
+        self.buy_band_bps = float(s.get("buy_band_bps", 30))    # 매수 지정가 상한
+        self.sell_band_bps = float(s.get("sell_band_bps", 50))  # 매도 체결우선 하한
+        self.quote_market = str(s.get("quote_market", "UN")).upper()  # UN통합/J KRX/NX
+        self.interval = int(s.get("poll_interval_sec", 30))
+
+        # 메모리 상태
+        self.positions: dict[str, dict] = {}    # symbol -> {trade_id, entry_price, peak, qty, entry_ts, name}
+        self.pending_buys: dict[str, dict] = {}  # symbol -> {entry_rate, volume, name, ts}
+        self.pending_sells: dict[str, dict] = {}  # symbol -> {reason, exit_price}
+
+        if not dry_run:
+            self._resume_open_trades()
+
+    def _resume_open_trades(self) -> None:
+        for t in self.store.open_trades():
+            self.positions[t["symbol"]] = {
+                "trade_id": t["id"], "entry_price": t["entry_price"],
+                "peak": t["entry_price"], "qty": t["qty"],
+                "entry_ts": t["entry_ts"], "name": t["name"],
+            }
+        if self.positions:
+            log(f"이전 미청산 포지션 {len(self.positions)}개 복구")
+
+    # --- 스캔/필터 ----------------------------------------------------------
+    def scan(self) -> list[dict]:
+        try:
+            return self.dom.top_gainers(self.scan_top, gubn="up", market=self.market,
+                                        min_price=self.price_min, min_volume=self.min_volume)
+        except KISApiError as e:
+            log(f"  스캔 오류: {e}")
+            return []
+
+    def filter_candidates(self, scanned: list[dict]) -> list[dict]:
+        out = []
+        for r in scanned:
+            if not (self.min_rate <= r["rate"] <= self.max_rate):
+                continue
+            if r["volume"] < self.min_volume:
+                continue
+            if not (self.price_min <= r["price"] <= self.price_max):
+                continue
+            if r["symbol"] in self.positions or r["symbol"] in self.pending_buys:
+                continue
+            out.append(r)
+        out.sort(key=lambda r: r["rate"], reverse=True)
+        return out
+
+    # --- 한 주기 ------------------------------------------------------------
+    def tick(self) -> None:
+        now = datetime.now()
+        try:
+            bal = self.dom.balance()
+        except KISApiError as e:
+            log(f"잔고 조회 오류: {e}")
+            return
+        held = {h["symbol"]: h for h in bal["holdings"]}
+        if self.dry_run:
+            # 주문·DB 변경 없이 스캔→필터→매수신호만 점검(보유 인수도 안 함)
+            self._enter_new(now)
+            return
+        self._save_account(now, bal)
+
+        self._reconcile_buys(held, now)
+        self._adopt_orphans(held, now)
+        self._reconcile_sells(held, now)
+        self._check_exits(held, now)
+        self._enter_new(now)
+
+    def _save_account(self, now: datetime, bal: dict) -> None:
+        hk = sum(h["eval_amt"] for h in bal["holdings"])
+        uk = sum(h["pnl"] for h in bal["holdings"])
+        self.store.save_account_snapshot(now.strftime("%Y-%m-%d %H:%M:%S"), {
+            "cash_krw": bal["cash"], "holdings_krw": hk,
+            "total_krw": bal["cash"] + hk, "realized_krw": 0.0,
+            "unrealized_krw": uk, "fx_rate": 1.0})
+
+    def _adopt_orphans(self, held: dict, now: datetime) -> None:
+        """DB/메모리에 없는 실제 보유분을 포지션으로 인수해 익절/손절 대상에 포함."""
+        for sym, h in held.items():
+            if sym in self.positions or sym in self.pending_buys or h["qty"] <= 0:
+                continue
+            tid = self.store.open_trade({
+                "symbol": sym, "name": h["name"], "market": "",
+                "entry_ts": now.strftime("%Y-%m-%d %H:%M:%S"),
+                "entry_price": h["avg_price"], "qty": h["qty"],
+                "entry_rate": None, "entry_volume": None})
+            self.positions[sym] = {
+                "trade_id": tid, "entry_price": h["avg_price"], "peak": h["avg_price"],
+                "qty": h["qty"], "entry_ts": now, "name": h["name"]}
+            log(f"  🔗 보유분 인수: {h['name']}({sym}) {h['qty']}주 @ {h['avg_price']:,.0f}원")
+
+    def _reconcile_buys(self, held: dict, now: datetime) -> None:
+        for sym, meta in list(self.pending_buys.items()):
+            if sym in held and held[sym]["qty"] > 0:
+                h = held[sym]
+                tid = self.store.open_trade({
+                    "symbol": sym, "name": meta["name"], "market": "",
+                    "entry_ts": now.strftime("%Y-%m-%d %H:%M:%S"),
+                    "entry_price": h["avg_price"], "qty": h["qty"],
+                    "entry_rate": meta["entry_rate"], "entry_volume": meta["volume"]})
+                self.positions[sym] = {
+                    "trade_id": tid, "entry_price": h["avg_price"], "peak": h["avg_price"],
+                    "qty": h["qty"], "entry_ts": now, "name": meta["name"]}
+                log(f"  ✅ 진입체결: {meta['name']}({sym}) {h['qty']}주 @ {h['avg_price']:,.0f}원")
+                del self.pending_buys[sym]
+            elif (now - meta["ts"]).total_seconds() > 120:
+                log(f"  ⏳ 미체결 매수 추적 종료: {meta['name']}({sym})")
+                del self.pending_buys[sym]
+
+    def _reconcile_sells(self, held: dict, now: datetime) -> None:
+        for sym, meta in list(self.pending_sells.items()):
+            if sym not in held or held[sym]["qty"] == 0:
+                pos = self.positions.get(sym)
+                if pos:
+                    exit_px = meta["exit_price"]
+                    pnl = (exit_px - pos["entry_price"]) * pos["qty"]
+                    pnl_pct = (exit_px / pos["entry_price"] - 1) * 100 if pos["entry_price"] else 0.0
+                    hold_sec = int((now - pos["entry_ts"]).total_seconds()) \
+                        if isinstance(pos["entry_ts"], datetime) else 0
+                    self.store.close_trade(
+                        pos["trade_id"], now.strftime("%Y-%m-%d %H:%M:%S"),
+                        exit_px, pnl, pnl_pct, meta["reason"], hold_sec)
+                    log(f"  💰 청산: {pos['name']}({sym}) @ {exit_px:,.0f}원 "
+                        f"손익 {pnl:+,.0f}원 ({pnl_pct:+.1f}%) [{meta['reason']}]")
+                    self.positions.pop(sym, None)
+                self.pending_sells.pop(sym, None)
+
+    def _check_exits(self, held: dict, now: datetime) -> None:
+        for sym, pos in list(self.positions.items()):
+            if sym in self.pending_sells or sym not in held:
+                continue
+            try:
+                price = self.dom.current_price(sym, self.quote_market)
+            except KISApiError:
+                continue
+            pos["peak"] = max(pos["peak"], price)
+            pnl_pct = (price / pos["entry_price"] - 1) * 100 if pos["entry_price"] else 0.0
+            drawdown = (price / pos["peak"] - 1) * 100 if pos["peak"] else 0.0
+
+            reason = None
+            if pnl_pct >= self.take_profit:
+                reason = "익절"
+            elif pnl_pct <= self.stop_loss:
+                reason = "손절"
+            elif pos["peak"] > pos["entry_price"] and drawdown <= self.trailing:
+                reason = "트레일링"
+            if not reason:
+                continue
+
+            limit = limit_price("sell", price, self.sell_band_bps)
+            if self.dry_run:
+                log(f"  [dry] 📤 매도: {pos['name']}({sym}) @ {price:,}원 "
+                    f"손익{pnl_pct:+.1f}% [{reason}]")
+                continue
+            try:
+                self.dom.sell(sym, pos["qty"], limit)
+                self.pending_sells[sym] = {"reason": reason, "exit_price": price}
+                log(f"  📤 매도주문: {pos['name']}({sym}) @ {price:,}원→지정가{limit:,} [{reason}]")
+            except KISApiError as e:
+                log(f"  매도 오류 {sym}: {e}")
+
+    def _enter_new(self, now: datetime) -> None:
+        room = self.max_positions - len(self.positions) - len(self.pending_buys)
+        if room <= 0:
+            return
+        scanned = self.scan()
+        if scanned:
+            self.store.save_surge_scan(now.strftime("%Y-%m-%d %H:%M:%S"), scanned)
+        candidates = self.filter_candidates(scanned)
+        if self.dry_run:
+            log(f"  스캔 {len(scanned)}종목 · 필터 통과 {len(candidates)}종목 · 빈자리 {room}")
+        for r in candidates[:room]:
+            sym = r["symbol"]
+            limit = limit_price("buy", r["price"], self.buy_band_bps)
+            if self.order_value_krw > 0:
+                qty = int(self.order_value_krw // limit) if limit > 0 else 0
+            else:
+                qty = self.order_qty
+            if qty < 1:
+                log(f"  매수 보류 {r['name']}({sym}): 예산부족(배정 {self.order_value_krw:,} < 1주 {limit:,})")
+                continue
+            if self.dry_run:
+                log(f"  [dry] 📥 매수: {r['name']}({sym}) +{r['rate']:.1f}% "
+                    f"@ {r['price']:,}원 x{qty} (지정가{limit:,})")
+                continue
+            try:
+                self.dom.buy(sym, qty, limit)
+                self.pending_buys[sym] = {
+                    "entry_rate": r["rate"], "volume": r["volume"],
+                    "name": r["name"], "ts": now}
+                log(f"  📥 매수주문: {r['name']}({sym}) +{r['rate']:.1f}% "
+                    f"@ {r['price']:,}원 x{qty} → 지정가{limit:,}")
+            except KISApiError as e:
+                log(f"  매수 오류 {sym}: {e}")
+
+    # --- 실행 ---------------------------------------------------------------
+    def run(self, once: bool = False) -> None:
+        mode = "DRY-RUN(주문안함)" if self.dry_run else (
+            "모의투자" if self.cfg.paper_trading else "!! 실전투자 !!")
+        log(f"국내 급등주 봇 시작 [{mode}] | 등락률 {self.min_rate}~{self.max_rate}% "
+            f"익절{self.take_profit}% 손절{self.stop_loss}% 트레일링{self.trailing}% "
+            f"최대보유{self.max_positions}")
+        if not kr_market_open():
+            log("⚠️ 현재 국내 정규장(평일 09:00~15:30) 시간이 아닙니다. "
+                "스캔은 직전 종가 기준이며 주문은 미체결될 수 있습니다.")
+        if once or self.dry_run:
+            self.tick()
+            self._report()
+            return  # --once / --dry-run 은 1주기만
+        try:
+            while True:
+                self.tick()
+                time.sleep(self.interval)
+        except KeyboardInterrupt:
+            log("사용자 중지.")
+            self._report()
+        finally:
+            self.store.close()
+
+    def _report(self) -> None:
+        log(f"보유 {len(self.positions)} / 매수대기 {len(self.pending_buys)} "
+            f"/ 매도대기 {len(self.pending_sells)}")
+        for sym, p in self.positions.items():
+            log(f"   - {p['name']}({sym}) {p['qty']}주 @ {p['entry_price']:,.0f}원")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="국내 급등주 포착 자동매매(모의)")
+    ap.add_argument("--once", action="store_true", help="1주기만 실행")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="실제 주문 없이 스캔·신호 흐름만 점검(1주기)")
+    args = ap.parse_args()
+    SurgeBot(dry_run=args.dry_run).run(once=args.once)
+
+
+if __name__ == "__main__":
+    main()

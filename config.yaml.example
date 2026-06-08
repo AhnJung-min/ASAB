@@ -71,3 +71,33 @@ strategy:
   #
   # 백테스트로 손절 효과 검증:
   #   python -m src.backtest --top-n 5 --stop-loss-pct 8   (vs 손절 없이 비교)
+
+# ===========================================================================
+# 장중 단타 트랙 (국내 급등주 봇) — python -m src.surge_bot
+# ---------------------------------------------------------------------------
+# ⚠️ 위 run_bot(일봉 추세 로테이션)과 완전히 별개인 실험 트랙이다.
+#    일봉 백테스트로 검증 불가(분봉 과거데이터 없음) → 모의계좌로 직접 돌리며
+#    surge_trade 학습데이터를 쌓는 게 검증 방법이다. 반드시 모의(paper)에서만.
+#
+# 안전 순서:
+#   python -m src.surge_bot --dry-run   # 주문 없이 스캔·신호만(장중 권장 첫 점검)
+#   python -m src.surge_bot --once      # 모의계좌에 실제(모의) 주문 1주기
+#   python -m src.surge_bot             # 주기 반복(장중 내내)
+surge:
+  market: "0000"          # 스캔 시장: 0000전체 / 0001코스피 / 1001코스닥
+  scan_top: 40            # 등락률 상위 몇 종목 받을지
+  min_rate: 5.0           # 진입 최소 등락률(%)
+  max_rate: 20.0          # 이 이상은 상한가 추격=체결불가라 제외
+  min_volume: 100000      # 최소 누적거래량(유동성)
+  price_min: 1000         # 동전주 배제(원)
+  price_max: 100000       # 고가주 배제(원)
+  max_positions: 3        # 동시 보유 종목 수
+  order_value_krw: 300000 # 종목당 배정금액(원). 0이면 order_qty 사용
+  order_qty: 1            # order_value_krw=0 일 때 주문 수량
+  take_profit_pct: 3.0    # 익절(+%)
+  stop_loss_pct: -2.0     # 손절(−%, 음수로)
+  trailing_pct: -2.0      # 트레일링스톱(고점 대비 −%, 음수로)
+  buy_band_bps: 30        # 매수 지정가 상한(현재가 대비 bps)
+  sell_band_bps: 50       # 매도 지정가(체결우선 위해 넓게)
+  quote_market: "UN"      # 시세: UN통합(KRX+NXT) / J KRX / NX 넥스트레이드
+  poll_interval_sec: 30   # 폴링 주기(초). 모의 호출제한 고려해 너무 짧게 금지
