@@ -9,3 +9,9 @@ font = "sans serif"
 
 [client]
 toolbarMode = "minimal"
+
+[browser]
+gatherUsageStats = false   # 첫 실행 이메일 입력 프롬프트 방지(터미널 멈춤 방지)
+
+[server]
+headless = true            # 이메일 프롬프트 없이 바로 서버 기동
