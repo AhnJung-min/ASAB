@@ -54,6 +54,15 @@ class TokenManager:
             return self._token  # type: ignore[return-value]
         return self._issue()
 
+    def invalidate(self) -> None:
+        """서버가 토큰을 거부(만료/무효)했을 때 캐시를 비워 다음 호출에 재발급."""
+        self._token = None
+        self._expire_at = 0.0
+        try:
+            self._cache_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+
     def _issue(self) -> str:
         url = f"{self.config.base_url}/oauth2/tokenP"
         body = {
@@ -61,17 +70,23 @@ class TokenManager:
             "appkey": self.config.app_key,
             "appsecret": self.config.app_secret,
         }
-        resp = requests.post(url, json=body, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-        if "access_token" not in data:
-            raise RuntimeError(f"토큰 발급 실패: {data}")
-
-        self._token = data["access_token"]
-        # expires_in(초) 또는 access_token_token_expired(문자열) 제공됨
-        expires_in = int(data.get("expires_in", 86400))
-        self._expire_at = time.time() + expires_in
-        self._save_cache()
-        when = datetime.now() + timedelta(seconds=expires_in)
-        print(f"[auth] 새 토큰 발급 (만료 예정: {when:%Y-%m-%d %H:%M})")
-        return self._token
+        # 발급 자체도 네트워크 끊김·발급제한(1분1회)으로 실패할 수 있어 재시도한다.
+        last_err: Exception | None = None
+        for attempt in range(4):
+            try:
+                resp = requests.post(url, json=body, timeout=10)
+                resp.raise_for_status()
+                data = resp.json()
+                if "access_token" in data:
+                    self._token = data["access_token"]
+                    expires_in = int(data.get("expires_in", 86400))
+                    self._expire_at = time.time() + expires_in
+                    self._save_cache()
+                    when = datetime.now() + timedelta(seconds=expires_in)
+                    print(f"[auth] 새 토큰 발급 (만료 예정: {when:%Y-%m-%d %H:%M})")
+                    return self._token
+                last_err = RuntimeError(f"토큰 발급 실패: {data}")
+            except requests.exceptions.RequestException as e:
+                last_err = e
+            time.sleep(2.0 * (attempt + 1))  # 발급제한/끊김 → 점증 대기 후 재시도
+        raise last_err or RuntimeError("토큰 발급 실패")

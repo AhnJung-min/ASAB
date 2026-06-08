@@ -105,6 +105,7 @@ class SurgeBot:
         self.trailing = float(s.get("trailing_pct", -2.0))      # 음수
         self.buy_band_bps = float(s.get("buy_band_bps", 30))    # 매수 지정가 상한
         self.sell_band_bps = float(s.get("sell_band_bps", 50))  # 매도 체결우선 하한
+        self.entry_order = str(s.get("entry_order_type", "limit")).lower()  # limit|market|best
         self.quote_market = str(s.get("quote_market", "UN")).upper()  # UN통합/J KRX/NX
         self.interval = int(s.get("poll_interval_sec", 30))
         self.ob_capture_top = int(s.get("ob_capture_top", 8))  # 호가 임밸런스 수집할 상위 후보수
@@ -363,18 +364,26 @@ class SurgeBot:
             if qty < 1:
                 log(f"  매수 보류 {r['name']}({sym}): 예산부족(배정 {self.order_value_krw:,} < 1주 {limit:,})")
                 continue
+            # 진입 주문 타입: limit(지정가) / market(시장가) / best(최유리지정가).
+            # 단타는 체결 보장이 중요 → market/best 로 '피 안 마르게' 진입 가능.
+            if self.entry_order == "market":
+                ord_dvsn, ord_price, ord_txt = "01", 0, "시장가"
+            elif self.entry_order == "best":
+                ord_dvsn, ord_price, ord_txt = "03", 0, "최유리"
+            else:
+                ord_dvsn, ord_price, ord_txt = "00", limit, f"지정가{limit:,}"
             if self.dry_run:
                 log(f"  [dry] 📥 매수: {r['name']}({sym}) +{r['rate']:.1f}% "
-                    f"@ {r['price']:,}원 x{qty} (지정가{limit:,})")
+                    f"@ {r['price']:,}원 x{qty} ({ord_txt})")
                 continue
             try:
-                self.dom.buy(sym, qty, limit)
-                # 주문 즉시 기록(임시가=지정가). 체결되면 _reconcile_buys가 실제가로 갱신.
+                self.dom.buy(sym, qty, ord_price, ord_dvsn=ord_dvsn)
+                # 주문 즉시 기록(임시 진입가=현재 추정가). 체결되면 _reconcile_buys가 실제가로 갱신.
                 # 이렇게 해야 --once/재시작에도 봇이 자기 포지션을 잃지 않는다.
                 tid = self.store.open_trade({
                     "symbol": sym, "name": r["name"], "market": "",
                     "entry_ts": now.strftime("%Y-%m-%d %H:%M:%S"),
-                    "entry_price": limit, "qty": qty,
+                    "entry_price": ord_price or r["price"], "qty": qty,
                     "entry_rate": r["rate"], "entry_volume": r["volume"],
                     "entry_rank": r.get("rank"), "entry_nscan": len(scanned),
                     "entry_ob_imbalance": r.get("ob_imbalance")})
@@ -382,7 +391,7 @@ class SurgeBot:
                     "trade_id": tid, "entry_rate": r["rate"], "volume": r["volume"],
                     "name": r["name"], "ts": now}
                 log(f"  📥 매수주문: {r['name']}({sym}) +{r['rate']:.1f}% "
-                    f"@ {r['price']:,}원 x{qty} → 지정가{limit:,}")
+                    f"@ {r['price']:,}원 x{qty} → {ord_txt}")
             except KISApiError as e:
                 log(f"  매수 오류 {sym}: {e}")
 

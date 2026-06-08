@@ -169,8 +169,11 @@ class DomesticStock:
         return rows[:top]
 
     # --- 주문 ---------------------------------------------------------------
-    def _order(self, symbol: str, qty: int, side: str, price: int = 0) -> dict[str, Any]:
-        """side: 'buy' | 'sell'. price=0 이면 시장가."""
+    # 주문구분(ORD_DVSN): 00=지정가 01=시장가 03=최유리지정가 04=최우선지정가
+    #                    11=IOC지정가 13=IOC시장가 (단타 체결 보장용)
+    def _order(self, symbol: str, qty: int, side: str, price: int = 0,
+               ord_dvsn: str | None = None) -> dict[str, Any]:
+        """side: 'buy' | 'sell'. ord_dvsn 미지정 시 price=0→시장가(01), 그외 지정가(00)."""
         if side == "buy":
             tr_id = "VTTC0802U" if self.paper else "TTTC0802U"
         elif side == "sell":
@@ -178,25 +181,29 @@ class DomesticStock:
         else:
             raise ValueError(f"알 수 없는 side: {side}")
 
-        # 주문구분 01=시장가, 00=지정가
-        ord_dvsn = "01" if price == 0 else "00"
+        if ord_dvsn is None:
+            ord_dvsn = "01" if price == 0 else "00"
+        # 시장가·최유리·최우선 등은 단가를 0으로 보낸다(지정가 00만 단가 사용).
+        unpr = price if ord_dvsn == "00" else 0
         body = {
             "CANO": self.c.config.account_no,
             "ACNT_PRDT_CD": self.c.config.account_product_code,
             "PDNO": symbol,
             "ORD_DVSN": ord_dvsn,
             "ORD_QTY": str(qty),
-            "ORD_UNPR": str(price),
+            "ORD_UNPR": str(unpr),
         }
         return self.c.post(
             "/uapi/domestic-stock/v1/trading/order-cash", tr_id=tr_id, body=body
         )
 
-    def buy(self, symbol: str, qty: int, price: int = 0) -> dict[str, Any]:
-        return self._order(symbol, qty, "buy", price)
+    def buy(self, symbol: str, qty: int, price: int = 0,
+            ord_dvsn: str | None = None) -> dict[str, Any]:
+        return self._order(symbol, qty, "buy", price, ord_dvsn)
 
-    def sell(self, symbol: str, qty: int, price: int = 0) -> dict[str, Any]:
-        return self._order(symbol, qty, "sell", price)
+    def sell(self, symbol: str, qty: int, price: int = 0,
+             ord_dvsn: str | None = None) -> dict[str, Any]:
+        return self._order(symbol, qty, "sell", price, ord_dvsn)
 
     # --- 잔고 ---------------------------------------------------------------
     def balance(self) -> dict[str, Any]:
