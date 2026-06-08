@@ -29,7 +29,7 @@ import yaml
 
 from .data.store import DataStore
 from .surge_bot import is_leverage_inverse
-from .surge_ml import DEFAULT_COST_BPS
+from .surge_ml import DEFAULT_COST_BPS, DEFAULT_SLIPPAGE_BPS
 
 
 def _cfg_surge() -> dict:
@@ -104,7 +104,9 @@ def simulate(series: list[tuple[str, float, float, float]], entry_price: float,
 def main() -> None:
     ap = argparse.ArgumentParser(description="급등주 청산 정책 분석")
     ap.add_argument("--cost-bps", type=float, default=DEFAULT_COST_BPS)
+    ap.add_argument("--slippage-bps", type=float, default=DEFAULT_SLIPPAGE_BPS)
     args = ap.parse_args()
+    cost = args.cost_bps + args.slippage_bps   # 비용+슬리피지 함께 차감(보수적)
 
     store = DataStore()
     # 분봉 series 를 (symbol,date) -> [(time, high, low, close)] 로 준비
@@ -134,7 +136,7 @@ def main() -> None:
             for tr in trails:
                 rets = [r for e in entries
                         if (r := simulate(bars[(e["symbol"], e["date"])], e["price"],
-                                          e["time"], tp, sl, tr, args.cost_bps)) is not None]
+                                          e["time"], tp, sl, tr, cost)) is not None]
                 if not rets:
                     continue
                 mean = sum(rets) / len(rets)
@@ -145,7 +147,7 @@ def main() -> None:
     # 기준선: 청산 없이 장마감까지 보유
     hold = [r for e in entries
             if (r := simulate(bars[(e["symbol"], e["date"])], e["price"],
-                              e["time"], 0, 0, 0, args.cost_bps)) is not None]
+                              e["time"], 0, 0, 0, cost)) is not None]
     hold_mean = sum(hold) / len(hold) if hold else 0.0
 
     results.sort(key=lambda d: -d["mean"])
