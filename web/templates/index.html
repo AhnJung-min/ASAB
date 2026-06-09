@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ASAB · 단타 대시보드</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">⚡ ASAB <span>단타 대시보드</span></div>
+    <div class="topbar-right">
+      <span id="today" class="pill">—</span>
+      <label class="auto"><input type="checkbox" id="autoref" checked> 자동새로고침</label>
+      <button id="refresh" class="btn">새로고침</button>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab active" data-tab="overview">개요</button>
+    <button class="tab" data-tab="trades">매매</button>
+    <button class="tab" data-tab="scan">스캔</button>
+    <button class="tab" data-tab="symbol">종목 차트</button>
+    <button class="tab" data-tab="rebound">하락·반등</button>
+  </nav>
+
+  <main>
+    <!-- 개요 -->
+    <section id="overview" class="page active">
+      <div class="cards" id="kpis"></div>
+      <div class="grid2">
+        <div class="panel">
+          <h3>자산 곡선</h3><canvas id="curveChart" height="120"></canvas>
+        </div>
+        <div class="panel">
+          <h3>청산 사유</h3><canvas id="reasonChart" height="120"></canvas>
+        </div>
+      </div>
+      <div class="panel">
+        <h3>시간대별 활동 (매수 / 스캔)</h3><canvas id="activityChart" height="90"></canvas>
+      </div>
+    </section>
+
+    <!-- 매매 -->
+    <section id="trades" class="page">
+      <div class="panel">
+        <h3>현재 보유 <span id="posCount" class="pill"></span></h3>
+        <div class="tablewrap"><table id="posTable"></table></div>
+      </div>
+      <div class="panel">
+        <h3>최근 청산</h3>
+        <div class="tablewrap"><table id="tradeTable"></table></div>
+      </div>
+    </section>
+
+    <!-- 스캔 -->
+    <section id="scan" class="page">
+      <div class="panel">
+        <h3>최근 스캔 후보 <span id="scanTs" class="pill"></span></h3>
+        <div class="tablewrap"><table id="scanTable"></table></div>
+      </div>
+    </section>
+
+    <!-- 종목 차트 -->
+    <section id="symbol" class="page">
+      <div class="panel">
+        <h3>종목 분봉 (당일)</h3>
+        <select id="symSelect" class="select"></select>
+        <div id="symMeta" class="symmeta"></div>
+        <canvas id="symChart" height="110"></canvas>
+      </div>
+    </section>
+
+    <!-- 하락·반등 -->
+    <section id="rebound" class="page">
+      <div class="panel">
+        <h3>오늘 하락(-%) 종목 · 저점 후 반등폭 <span class="pill warn">후견지명·참고용</span></h3>
+        <div class="tablewrap"><table id="rebTable"></table></div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot">모의투자 데이터 · data/market.db · ASAB</footer>
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -54,9 +54,11 @@ MENU: list[tuple[str, list[tuple[str, list[list[str]], str, bool]]]] = [
          "투자자·신용 등 수급 데이터 수집", False),
     ]),
     ("도구", [
-        ("대시보드 켜기", [_py("-m", "streamlit", "run", "dashboard.py",
+        ("웹 대시보드 (단타) 🌐", [_py("web/app.py")],
+         "Flask 웹앱 — http://localhost:8000 (단타 중심, Ctrl+C 로 종료)", False),
+        ("대시보드 켜기(Streamlit)", [_py("-m", "streamlit", "run", "dashboard.py",
                           "--server.port", "8501")],
-         "브라우저 대시보드(Ctrl+C 로 종료)", False),
+         "기존 종합 대시보드(Ctrl+C 로 종료)", False),
         ("백업 시작", [_py("-m", "src.backup", "--dest", _BACKUP_DEST, "--watch",
                        "--threshold", "100000", "--interval", "300")],
          "구글드라이브로 자동 백업 감시", False),
