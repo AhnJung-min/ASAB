@@ -114,6 +114,13 @@ class SurgeBot:
         self.min_imbalance = float(s.get("min_imbalance", 0.0))
         # 최종 매수 정렬 기준: imbalance(매수세) | value(거래대금) | rate(등락률)
         self.rank_by = str(s.get("rank_by", "imbalance")).lower()
+        # === 하락 반등 데이터 수집 (수집 전용 — 매수는 안 함) ===
+        # 하락률 상위 종목도 스캔해 surge_scan 에 적재(source='rebound'). 음수 등락률이라
+        # 기존 매수 필터(min_rate>0)에 자동으로 안 걸려 매수 대상은 아니다.
+        self.scan_rebound = bool(s.get("scan_rebound", True))
+        self.rebound_top = int(s.get("rebound_top", 40))      # 하락률 상위 몇 종목 스캔
+        # 그 중 호가 임밸런스 수집할 상위 N(반등신호=매수세 복귀; API비용 고려 소수)
+        self.rebound_ob_top = int(s.get("rebound_ob_top", 4))
         self.regime_filter = bool(s.get("regime_filter", True))   # 지수 급락 시 매수 중단
         self.regime_index = str(s.get("regime_index", "069500"))  # 국면 프록시(KODEX200)
         self.regime_min_chg = float(s.get("regime_min_chg", -1.5))  # 지수 등락률 이 미만이면 OFF
@@ -161,6 +168,11 @@ class SurgeBot:
         if self.scan_source in ("rate", "both"):
             jobs.append(("rate", lambda: self.dom.top_gainers(
                 self.scan_top, gubn="up", market=self.market,
+                min_price=self.price_min, min_volume=self.min_volume)))
+        # 하락률 상위(반등 후보) — 데이터 수집 전용. 매수 안 함(음수 등락률).
+        if self.scan_rebound:
+            jobs.append(("rebound", lambda: self.dom.top_gainers(
+                self.rebound_top, gubn="down", market=self.market,
                 min_price=self.price_min, min_volume=self.min_volume)))
         for src, fn in jobs:
             try:
@@ -211,6 +223,19 @@ class SurgeBot:
             obs.append({"symbol": c["symbol"], **ob})
         if obs:
             self.store.save_surge_orderbook(now.strftime("%Y-%m-%d %H:%M:%S"), obs)
+
+    def _capture_rebound_orderbook(self, scanned: list[dict], now: datetime) -> None:
+        """하락 반등 후보(source='rebound') 중 유동성 상위 N개의 호가 임밸런스 수집.
+
+        반등의 핵심 신호 = 떨어지던 종목에 매수세(양의 임밸런스)가 돌아오는 것.
+        매수는 안 하지만, 이 신호를 surge_orderbook 에 남겨 ML이 학습하게 한다.
+        (API 비용 위해 rebound_ob_top 소수만.)
+        """
+        if self.rebound_ob_top <= 0:
+            return
+        reb = [r for r in scanned if r.get("source") == "rebound"]
+        reb.sort(key=lambda r: r.get("value", 0), reverse=True)  # 유동성 우선
+        self._capture_orderbook(reb[: self.rebound_ob_top], now)
 
     def _apply_model(self, candidates: list[dict], n_scan: int) -> None:
         """모델이 있으면 후보에 예측수익 점수를 매겨 재정렬하고 하한 미만은 제외."""
@@ -386,6 +411,7 @@ class SurgeBot:
             r["index_chg"] = idx_chg                 # 학습 피처로 함께 저장
         if scanned:
             self.store.save_surge_scan(now.strftime("%Y-%m-%d %H:%M:%S"), scanned)
+        self._capture_rebound_orderbook(scanned, now)  # 하락 반등 후보 호가 수집(데이터용)
         candidates = self.filter_candidates(scanned)
         self._capture_orderbook(candidates, now)     # 상위 후보 호가 임밸런스 수집·부착(학습 피처)
         self._rank_by_pressure(candidates)           # 매수세 우위 필터 + 거래대금/임밸런스 정렬
