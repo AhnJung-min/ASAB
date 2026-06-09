@@ -134,6 +134,7 @@ class DomesticStock:
                     "price": int(r["stck_prpr"]),
                     "rate": float(r["prdy_ctrt"]),     # 전일대비율(등락률%)
                     "volume": int(r["acml_vol"]),      # 누적거래량
+                    "value": int(r.get("acml_tr_pbmn", 0) or 0),  # 거래대금(있으면)
                     "rank": int(r.get("data_rank", 0) or 0),
                 })
             except (KeyError, ValueError):

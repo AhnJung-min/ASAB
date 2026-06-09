@@ -109,6 +109,11 @@ class SurgeBot:
         self.quote_market = str(s.get("quote_market", "UN")).upper()  # UN통합/J KRX/NX
         self.interval = int(s.get("poll_interval_sec", 30))
         self.ob_capture_top = int(s.get("ob_capture_top", 8))  # 호가 임밸런스 수집할 상위 후보수
+        # === 종목 선정 기준 (유동성·매수세 우위 중심) ===
+        # 매수 전 호가 임밸런스가 이 값 이상인 종목만 매수(0=매수세 우위, 음수허용=-1)
+        self.min_imbalance = float(s.get("min_imbalance", 0.0))
+        # 최종 매수 정렬 기준: imbalance(매수세) | value(거래대금) | rate(등락률)
+        self.rank_by = str(s.get("rank_by", "imbalance")).lower()
         self.regime_filter = bool(s.get("regime_filter", True))   # 지수 급락 시 매수 중단
         self.regime_index = str(s.get("regime_index", "069500"))  # 국면 프록시(KODEX200)
         self.regime_min_chg = float(s.get("regime_min_chg", -1.5))  # 지수 등락률 이 미만이면 OFF
@@ -148,13 +153,14 @@ class SurgeBot:
         out: list[dict] = []
         seen: set[str] = set()
         jobs = []
-        if self.scan_source in ("rate", "both"):
-            jobs.append(("rate", lambda: self.dom.top_gainers(
-                self.scan_top, gubn="up", market=self.market,
-                min_price=self.price_min, min_volume=self.min_volume)))
+        # 거래대금(유동성) 소스를 먼저 — 중복 종목은 거래대금(value) 있는 쪽을 유지
         if self.scan_source in ("value", "both"):
             jobs.append(("value", lambda: self.dom.top_value(
                 self.value_top, market=self.market,
+                min_price=self.price_min, min_volume=self.min_volume)))
+        if self.scan_source in ("rate", "both"):
+            jobs.append(("rate", lambda: self.dom.top_gainers(
+                self.scan_top, gubn="up", market=self.market,
                 min_price=self.price_min, min_volume=self.min_volume)))
         for src, fn in jobs:
             try:
@@ -218,6 +224,25 @@ class SurgeBot:
         candidates[:] = [c for c in candidates if c.get("ml_score", 0.0) >= self.min_pred_ret]
         candidates.sort(key=lambda c: -c.get("ml_score", 0.0))
 
+    def _rank_by_pressure(self, candidates: list[dict]) -> None:
+        """매수세 우위 필터 + 정렬(in-place). 모델이 없을 때의 종목 선정 규칙.
+
+        호가 임밸런스는 상위 후보(ob_capture_top)만 수집되므로, 임밸런스가
+        없는(미수집) 후보는 매수 대상에서 제외한다(보수적 — 호가 확인된 것만).
+        그 중 매수세 우위(imbalance >= min_imbalance)만 남기고 rank_by 로 정렬.
+        """
+        if not candidates:
+            return
+        scored = [c for c in candidates if c.get("ob_imbalance") is not None
+                  and c["ob_imbalance"] >= self.min_imbalance]
+        keys = {
+            "imbalance": lambda c: c.get("ob_imbalance", -1.0),
+            "value": lambda c: c.get("value", 0),
+            "rate": lambda c: c.get("rate", 0.0),
+        }
+        scored.sort(key=keys.get(self.rank_by, keys["imbalance"]), reverse=True)
+        candidates[:] = scored
+
     def filter_candidates(self, scanned: list[dict]) -> list[dict]:
         out = []
         for r in scanned:
@@ -234,7 +259,8 @@ class SurgeBot:
             if r["symbol"] in self.positions or r["symbol"] in self.pending_buys:
                 continue
             out.append(r)
-        out.sort(key=lambda r: r["rate"], reverse=True)
+        # 거래대금(유동성) 높은 순 — 호가 임밸런스를 '유동성 좋은 후보부터' 수집하기 위함
+        out.sort(key=lambda r: r.get("value", 0), reverse=True)
         return out
 
     # --- 한 주기 ------------------------------------------------------------
@@ -363,7 +389,8 @@ class SurgeBot:
             self.store.save_surge_scan(now.strftime("%Y-%m-%d %H:%M:%S"), scanned)
         candidates = self.filter_candidates(scanned)
         self._capture_orderbook(candidates, now)     # 상위 후보 호가 임밸런스 수집·부착
-        self._apply_model(candidates, len(scanned))  # 모델 있으면 ML점수로 재정렬·필터
+        self._rank_by_pressure(candidates)           # 매수세 우위 필터 + 거래대금/임밸런스 정렬
+        self._apply_model(candidates, len(scanned))  # 모델 있으면 ML점수로 재정렬·필터(우선)
         if self.dry_run:
             tag = " · ML점수순" if self._model_bundle and self.use_model else ""
             log(f"  스캔 {len(scanned)}종목 · 필터 통과 {len(candidates)}종목 · "
