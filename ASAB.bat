@@ -1,5 +1,5 @@
 @echo off
-chcp 65001 >/dev/null
+chcp 65001 >nul
 cd /d "%~dp0"
-title ASAB 통합 실행
+title ASAB
 py -m src.menu
