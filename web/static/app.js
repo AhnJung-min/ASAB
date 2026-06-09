@@ -19,23 +19,21 @@ document.querySelectorAll(".tab").forEach((t) => t.onclick = () => {
   $("#" + t.dataset.tab).classList.add("active");
   if (t.dataset.tab === "symbol") loadSymbols();
   if (t.dataset.tab === "rebound") loadRebound();
-  if (t.dataset.tab === "scan") loadScan();
   if (t.dataset.tab === "trades") loadTrades();
-  if (t.dataset.tab === "account") loadAccount();
 });
 
-// ---------- 실제 계좌 (라이브) ----------
+// ---------- 실제 계좌 (라이브, 개요 상단) ----------
 async function loadAccount() {
   $("#acctTs").textContent = "조회 중…";
   const d = await api("/api/live_account");
-  if (d.error) { $("#acctKpis").innerHTML = `<div class="card"><div class="label">조회 실패</div><div class="value neg" style="font-size:15px">${d.error}</div></div>`; $("#acctTable").innerHTML = ""; $("#acctTs").textContent = ""; return; }
+  if (d.error) { $("#acctKpis").innerHTML = `<div class="card"><div class="label">조회 실패</div><div class="value neg" style="font-size:14px">${d.error}</div></div>`; $("#acctTable").innerHTML = ""; $("#acctTs").textContent = ""; return; }
   $("#acctTs").textContent = d.ts;
+  $("#acctCount").textContent = d.holdings.length + "종목";
   const cards = [
     ["총자산", fmt(d.total) + "원", ""],
     ["예수금(현금)", fmt(d.cash) + "원", "neu"],
     ["평가금액", fmt(d.holdings_krw) + "원", ""],
     ["평가손익", sign(d.unrealized, 0) + "원", cls(d.unrealized)],
-    ["보유 종목", d.holdings.length + "종목", "neu"],
   ];
   $("#acctKpis").innerHTML = cards.map(([l, v, c]) =>
     `<div class="card"><div class="label">${l}</div><div class="value ${c}">${v}</div></div>`).join("");
@@ -47,6 +45,7 @@ async function loadAccount() {
 
 // ---------- 개요 ----------
 async function loadOverview() {
+  loadAccount();  // 상단 실제 계좌(라이브)
   const d = await api("/api/overview");
   $("#today").textContent = d.today;
   const ret = d.total_krw ? (d.realized_krw + d.unrealized_krw) : 0;
@@ -120,6 +119,7 @@ async function loadTrades() {
       <td><span class="tag ${t.reason}">${t.reason}</span></td>
       <td>${t.hold_sec ? Math.round(t.hold_sec / 60) + "분" : "—"}</td>
       <td>${(t.exit_ts || "").slice(11, 19)}</td></tr>`).join("") + "</tbody>";
+  loadScan();  // 같은 탭에 스캔도 표시
 }
 
 // ---------- 스캔 ----------
@@ -172,10 +172,10 @@ function thead(cols) { return "<thead><tr>" + cols.map((c) => `<th>${c}</th>`).j
 // ---------- 새로고침 ----------
 function refreshActive() {
   const t = document.querySelector(".tab.active").dataset.tab;
-  loadOverview();
-  if (t === "trades") loadTrades();
-  if (t === "scan") loadScan();
-  if (t === "rebound") loadRebound();
+  if (t === "overview") loadOverview();   // 실제계좌+단타요약
+  else if (t === "trades") loadTrades();  // 보유+청산+스캔
+  else if (t === "rebound") loadRebound();
+  else loadOverview();
 }
 $("#refresh").onclick = refreshActive;
 let timer = setInterval(() => { if ($("#autoref").checked) refreshActive(); }, 15000);

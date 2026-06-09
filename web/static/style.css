@@ -38,6 +38,8 @@ main{padding:18px 22px 40px;max-width:1240px;margin:0 auto}
 .card .sub{color:var(--muted);font-size:12px;margin-top:3px}
 .pos{color:var(--green)}.neg{color:var(--red)}.neu{color:var(--blue)}
 
+.sect-head{margin:6px 2px 12px}
+.sect-head h2{font-size:16px;margin:0;display:flex;align-items:center;gap:8px}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
 @media(max-width:840px){.grid2{grid-template-columns:1fr}}
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;

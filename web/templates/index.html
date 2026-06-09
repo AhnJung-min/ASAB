@@ -19,54 +19,44 @@
 
   <nav class="tabs">
     <button class="tab active" data-tab="overview">개요</button>
-    <button class="tab" data-tab="account">실제 계좌</button>
-    <button class="tab" data-tab="trades">단타 매매</button>
-    <button class="tab" data-tab="scan">스캔</button>
+    <button class="tab" data-tab="trades">매매·스캔</button>
     <button class="tab" data-tab="symbol">종목 차트</button>
     <button class="tab" data-tab="rebound">하락·반등</button>
   </nav>
 
   <main>
-    <!-- 개요 -->
+    <!-- 개요 (실제 계좌 + 단타 요약) -->
     <section id="overview" class="page active">
+      <div class="sect-head">
+        <h2>실제 계좌 <span class="pill">라이브</span> <span id="acctTs" class="pill"></span></h2>
+      </div>
+      <div class="cards" id="acctKpis"></div>
+      <div class="panel">
+        <h3>보유 종목 <span id="acctCount" class="pill"></span></h3>
+        <div class="tablewrap"><table id="acctTable"></table></div>
+      </div>
+
+      <div class="sect-head"><h2>단타 봇 요약 <span id="today" class="pill">—</span></h2></div>
       <div class="cards" id="kpis"></div>
       <div class="grid2">
-        <div class="panel">
-          <h3>자산 곡선</h3><canvas id="curveChart" height="120"></canvas>
-        </div>
-        <div class="panel">
-          <h3>청산 사유</h3><canvas id="reasonChart" height="120"></canvas>
-        </div>
+        <div class="panel"><h3>자산 곡선(봇 스냅샷)</h3><canvas id="curveChart" height="120"></canvas></div>
+        <div class="panel"><h3>청산 사유</h3><canvas id="reasonChart" height="120"></canvas></div>
       </div>
       <div class="panel">
         <h3>시간대별 활동 (매수 / 스캔)</h3><canvas id="activityChart" height="90"></canvas>
       </div>
     </section>
 
-    <!-- 실제 계좌 (라이브) -->
-    <section id="account" class="page">
-      <div class="panel">
-        <h3>실제 KIS 모의계좌 <span class="pill">라이브 조회</span> <span id="acctTs" class="pill"></span></h3>
-        <div class="cards" id="acctKpis"></div>
-        <div class="tablewrap"><table id="acctTable"></table></div>
-        <p class="symmeta">이 탭은 KIS를 실시간 조회한 <b>실제 계좌 전부</b>입니다(단타+일봉로테이션+기타). 개요 탭의 단타 봇 뷰와 다를 수 있습니다.</p>
-      </div>
-    </section>
-
-    <!-- 매매 -->
+    <!-- 매매·스캔 -->
     <section id="trades" class="page">
       <div class="panel">
-        <h3>현재 보유 <span id="posCount" class="pill"></span></h3>
+        <h3>단타 봇 보유 <span id="posCount" class="pill"></span></h3>
         <div class="tablewrap"><table id="posTable"></table></div>
       </div>
       <div class="panel">
         <h3>최근 청산</h3>
         <div class="tablewrap"><table id="tradeTable"></table></div>
       </div>
-    </section>
-
-    <!-- 스캔 -->
-    <section id="scan" class="page">
       <div class="panel">
         <h3>최근 스캔 후보 <span id="scanTs" class="pill"></span></h3>
         <div class="tablewrap"><table id="scanTable"></table></div>
