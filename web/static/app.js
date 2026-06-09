@@ -48,13 +48,11 @@ async function loadOverview() {
   loadAccount();  // 상단 실제 계좌(라이브)
   const d = await api("/api/overview");
   $("#today").textContent = d.today;
-  const ret = d.total_krw ? (d.realized_krw + d.unrealized_krw) : 0;
   const ic = d.model && d.model.oos_ic != null ? d.model.oos_ic : null;
+  // 단타 '고유' 지표만. 전체계좌 총자산/평가손익은 위 실제계좌(라이브)에서 봄.
   const cards = [
-    ["현재 총자산", fmt(d.total_krw) + "원", "", ""],
-    ["실현손익(오늘)", sign(d.realized_krw, 0) + "원", cls(d.realized_krw), ""],
-    ["평가손익", sign(d.unrealized_krw, 0) + "원", cls(d.unrealized_krw), ""],
-    ["보유 / 청산", d.open_positions + " / " + d.closed_today, "neu", "오늘 매매"],
+    ["단타 실현손익(오늘)", sign(d.realized_krw, 0) + "원", cls(d.realized_krw), "단타 봇 청산분"],
+    ["보유 / 청산", d.open_positions + " / " + d.closed_today, "neu", "단타 봇 · 오늘"],
     ["승률(익절)", d.winrate + "%", d.winrate >= 50 ? "pos" : "neg", ""],
     ["스캔 수집", fmt(d.scans_today), "neu", "반등후보 " + d.rebound_symbols + "종목"],
     ["분봉", fmt(d.minute_bars), "neu", "오늘 수집"],
