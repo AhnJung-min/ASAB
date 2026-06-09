@@ -297,7 +297,10 @@ class SurgeBot:
         try:
             bal = self.dom.balance()
         except KISApiError as e:
-            log(f"잔고 조회 오류: {e}")
+            # 모의 서버 원장 초당 한도(EGW00201)는 비치명적 — 이번 주기만 건너뛰고 복구.
+            # 로그를 더럽히지 않게 조용히 넘어간다(다른 오류만 표시).
+            if e.code != "EGW00201":
+                log(f"잔고 조회 오류: {e}")
             return
         held = {h["symbol"]: h for h in bal["holdings"]}
         if self.dry_run:
