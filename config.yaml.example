@@ -84,36 +84,52 @@ strategy:
 #   python -m src.surge_bot --once      # 모의계좌에 실제(모의) 주문 1주기
 #   python -m src.surge_bot             # 주기 반복(장중 내내)
 surge:
+  # --- 스캔 풀 ---
   market: "0000"          # 스캔 시장: 0000전체 / 0001코스피 / 1001코스닥
   scan_source: "both"     # 후보 출처: rate(등락률상위) / value(거래대금상위·유동성) / both
   scan_top: 40            # 등락률 상위 몇 종목 받을지
   value_top: 40           # 거래대금 상위 몇 종목 받을지(유동성 단타 유니버스)
-  exclude_etf: true       # 지수 ETF/ETN 제외(개별주만 단타). 거래대금 상위엔 ETF 섞임
-  min_rate: 5.0           # 진입 최소 등락률(%)
-  max_rate: 20.0          # 이 이상은 상한가 추격=체결불가라 제외
+  exclude_etf: true       # 지수 ETF/ETN 제외(개별주만 단타)
+  exclude_leverage_inverse: true  # 레버리지·인버스 제외(추세가정·decay 부적합)
+
+  # --- 진입 필터 ---
+  min_rate: 3.0           # 진입 최소 등락률(%)
+  max_rate: 25.0          # 상한(강세장 급등주도 포함; 너무 낮으면 후보 고갈)
   min_volume: 100000      # 최소 누적거래량(유동성)
-  price_min: 1000         # 동전주 배제(원)
+  price_min: 2000         # 동전주 배제(원)
   price_max: 100000       # 고가주 배제(원)
-  exclude_leverage_inverse: true  # 레버리지·인버스 ETN/ETF 제외(추세가정·decay 부적합)
-  max_positions: 3        # 동시 보유 종목 수
-  order_value_krw: 300000 # 종목당 배정금액(원). 0이면 order_qty 사용
+
+  # --- 종목 선정 기준 (매수세 우위 + 유동성) ---
+  min_imbalance: 0.0      # 호가 매수세 우위(임밸런스>=0) 선호. 호가 미수집은 거래대금순 매수
+  rank_by: "imbalance"    # 정렬: imbalance(매수세) | value(거래대금) | rate(등락률)
+  reentry_cooldown_min: 10 # 판 종목 재매수 금지(분) — 같은 종목 churn 방지
+  ob_capture_top: 10      # 호가 잔량 임밸런스 수집(=매수 후보 풀) 상위 N (호출제한↔거래활성)
+
+  # --- 하락 반등 데이터 수집 (수집 전용, 매수 안 함) ---
+  scan_rebound: true      # 하락률 상위도 스캔해 양방향 데이터 수집
+  rebound_top: 40
+  rebound_ob_top: 4       # 반등 후보 호가 수집 상위 N
+
+  # --- 포지션·청산 ---
+  max_positions: 6        # 동시 보유 종목 수(많을수록 주기당 호출↑)
+  order_value_krw: 0      # 종목당 배정금액(원). 0이면 order_qty 사용
   order_qty: 1            # order_value_krw=0 일 때 주문 수량
-  take_profit_pct: 3.0    # 익절(+%)
-  stop_loss_pct: -2.0     # 손절(−%, 음수로)
-  trailing_pct: -2.0      # 트레일링스톱(고점 대비 −%, 음수로)
-  buy_band_bps: 30        # 매수 지정가 상한(현재가 대비 bps) — entry_order_type=limit 일 때
+  take_profit_pct: 2.0    # 익절(+%)
+  stop_loss_pct: -1.0     # 손절(−%, 음수로)
+  trailing_pct: -1.5      # 트레일링스톱(고점 대비 −%, 음수로)
+  max_hold_min: 30        # 보유 N분 초과 시 강제 청산(리밸런싱). 0=비활성
+  buy_band_bps: 30        # 매수 지정가 상한(현재가 대비 bps)
   sell_band_bps: 50       # 매도 지정가(체결우선 위해 넓게)
-  entry_order_type: "limit"  # 진입 주문: limit(지정가) / market(시장가) / best(최유리지정가)
-                             # 단타 체결 보장이 중요하면 market·best. 단 슬리피지 감수.
-  quote_market: "UN"      # 시세: UN통합(KRX+NXT) / J KRX / NX 넥스트레이드
-  poll_interval_sec: 30   # 폴링 주기(초). 모의 호출제한 고려해 너무 짧게 금지
-  ob_capture_top: 8       # 호가 잔량 임밸런스 수집할 상위 후보 수(호출제한↔피처품질)
-  # --- 지수 국면 필터(방어) — Track1에서 검증된 최강 낙폭 통제수단 ---
+  entry_order_type: "limit"  # limit(지정가) / market(시장가) / best(최유리지정가)
+  quote_market: "UN"      # 시세: UN통합(KRX+NXT) / J KRX / NX
+  poll_interval_sec: 45   # 폴링 주기(초). 모의 호출제한 고려(45초 권장)
+
+  # --- 지수 국면 필터(방어) ---
   regime_filter: true     # 지수 급락 중이면 신규 매수 중단(청산·수집은 계속)
-  regime_index: "069500"  # 시장 국면 프록시(KODEX200 등락률)
+  regime_index: "069500"  # 시장 국면 프록시(KODEX200)
   regime_min_chg: -1.5    # 지수 등락률 이 % 미만이면 매수 OFF
+
   # --- 학습 모델(선택) — data/surge_model.pkl 있을 때만 작동 ---
-  # 단타 데이터를 쌓아 학습: python -m src.surge_ml --train (데이터 충분 시)
-  # 모델이 있으면 매수 후보를 '예측 N분 수익'으로 재정렬한다. 없으면 등락률순.
-  use_model: true         # 모델로 후보 점수화/재정렬
-  min_pred_ret: -1.0      # 예측수익 이 값 미만 후보 제외(-1=제외안함, 0=음수예측 제외)
+  # 단타 데이터를 쌓아 학습: python -m src.surge_ml --train
+  use_model: true         # 모델로 후보 점수화/재정렬(없으면 위 규칙)
+  min_pred_ret: -1.0      # 예측수익 이 값 미만 후보 제외(-1=제외안함)
