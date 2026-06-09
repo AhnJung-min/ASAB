@@ -124,6 +124,8 @@ class SurgeBot:
         self.rebound_top = int(s.get("rebound_top", 40))      # 하락률 상위 몇 종목 스캔
         # 그 중 호가 임밸런스 수집할 상위 N(반등신호=매수세 복귀; API비용 고려 소수)
         self.rebound_ob_top = int(s.get("rebound_ob_top", 4))
+        # 재진입 쿨다운(분): 판 종목을 이 시간 동안 다시 안 산다(같은 종목 churn·휩쏘 방지).
+        self.reentry_cooldown_sec = int(float(s.get("reentry_cooldown_min", 10)) * 60)
         self.regime_filter = bool(s.get("regime_filter", True))   # 지수 급락 시 매수 중단
         self.regime_index = str(s.get("regime_index", "069500"))  # 국면 프록시(KODEX200)
         self.regime_min_chg = float(s.get("regime_min_chg", -1.5))  # 지수 등락률 이 미만이면 OFF
@@ -136,6 +138,7 @@ class SurgeBot:
         self.positions: dict[str, dict] = {}    # symbol -> {trade_id, entry_price, peak, qty, entry_ts, name}
         self.pending_buys: dict[str, dict] = {}  # symbol -> {entry_rate, volume, name, ts}
         self.pending_sells: dict[str, dict] = {}  # symbol -> {reason, exit_price}
+        self.recent_exits: dict[str, datetime] = {}  # symbol -> 마지막 청산시각(재진입 쿨다운)
 
         if not dry_run:
             self._resume_open_trades()
@@ -286,6 +289,10 @@ class SurgeBot:
                 continue
             if r["symbol"] in self.positions or r["symbol"] in self.pending_buys:
                 continue
+            # 재진입 쿨다운: 최근 판 종목은 일정시간 다시 안 산다(같은 종목 churn 방지)
+            ex = self.recent_exits.get(r["symbol"])
+            if ex and (datetime.now() - ex).total_seconds() < self.reentry_cooldown_sec:
+                continue
             out.append(r)
         # 거래대금(유동성) 높은 순 — 호가 임밸런스를 '유동성 좋은 후보부터' 수집하기 위함
         out.sort(key=lambda r: r.get("value", 0), reverse=True)
@@ -371,6 +378,7 @@ class SurgeBot:
                     log(f"  💰 청산: {pos['name']}({sym}) @ {exit_px:,.0f}원 "
                         f"손익 {pnl:+,.0f}원 ({pnl_pct:+.1f}%) [{meta['reason']}]")
                     self.positions.pop(sym, None)
+                    self.recent_exits[sym] = now   # 재진입 쿨다운 시작
                 self.pending_sells.pop(sym, None)
 
     def _hold_seconds(self, pos: dict, now: datetime) -> float:
