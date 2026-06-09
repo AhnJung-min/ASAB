@@ -103,6 +103,9 @@ class SurgeBot:
         self.take_profit = float(s.get("take_profit_pct", 3.0))
         self.stop_loss = float(s.get("stop_loss_pct", -2.0))    # 음수
         self.trailing = float(s.get("trailing_pct", -2.0))      # 음수
+        # 보유 시간 초과 청산(분). 손익절에 안 걸리고 정체된 종목을 강제 청산→리밸런싱.
+        # 0이면 비활성. 데이터로도 '정체 진입'의 결과(reason=시간초과)가 라벨로 남음.
+        self.max_hold_sec = int(float(s.get("max_hold_min", 30)) * 60)
         self.buy_band_bps = float(s.get("buy_band_bps", 30))    # 매수 지정가 상한
         self.sell_band_bps = float(s.get("sell_band_bps", 50))  # 매도 체결우선 하한
         self.entry_order = str(s.get("entry_order_type", "limit")).lower()  # limit|market|best
@@ -358,8 +361,7 @@ class SurgeBot:
                     exit_px = meta["exit_price"]
                     pnl = (exit_px - pos["entry_price"]) * pos["qty"]
                     pnl_pct = (exit_px / pos["entry_price"] - 1) * 100 if pos["entry_price"] else 0.0
-                    hold_sec = int((now - pos["entry_ts"]).total_seconds()) \
-                        if isinstance(pos["entry_ts"], datetime) else 0
+                    hold_sec = int(self._hold_seconds(pos, now))
                     self.store.close_trade(
                         pos["trade_id"], now.strftime("%Y-%m-%d %H:%M:%S"),
                         exit_px, pnl, pnl_pct, meta["reason"], hold_sec)
@@ -367,6 +369,16 @@ class SurgeBot:
                         f"손익 {pnl:+,.0f}원 ({pnl_pct:+.1f}%) [{meta['reason']}]")
                     self.positions.pop(sym, None)
                 self.pending_sells.pop(sym, None)
+
+    def _hold_seconds(self, pos: dict, now: datetime) -> float:
+        """보유 경과초. entry_ts 가 datetime(신규)이든 문자열(복구분)이든 처리."""
+        ts = pos.get("entry_ts")
+        if isinstance(ts, datetime):
+            return (now - ts).total_seconds()
+        try:
+            return (now - datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")).total_seconds()
+        except (TypeError, ValueError):
+            return 0.0
 
     def _check_exits(self, held: dict, now: datetime) -> None:
         for sym, pos in list(self.positions.items()):
@@ -387,6 +399,9 @@ class SurgeBot:
                 reason = "손절"
             elif pos["peak"] > pos["entry_price"] and drawdown <= self.trailing:
                 reason = "트레일링"
+            elif self.max_hold_sec > 0 and self._hold_seconds(pos, now) >= self.max_hold_sec:
+                # 손익절에 안 걸리고 정체됨 → 강제 청산(자리 비워 리밸런싱)
+                reason = "시간초과"
             if not reason:
                 continue
 
