@@ -51,13 +51,14 @@ async function loadOverview() {
   const ic = d.model && d.model.oos_ic != null ? d.model.oos_ic : null;
   // 단타 '고유' 지표만. 전체계좌 총자산/평가손익은 위 실제계좌(라이브)에서 봄.
   const cards = [
-    ["단타 실현손익(오늘)", sign(d.realized_krw, 0) + "원", cls(d.realized_krw), "단타 봇 청산분"],
-    ["보유 / 청산", d.open_positions + " / " + d.closed_today, "neu", "단타 봇 · 오늘"],
-    ["승률(익절)", d.winrate + "%", d.winrate >= 50 ? "pos" : "neg", ""],
-    ["스캔 수집", fmt(d.scans_today), "neu", "반등후보 " + d.rebound_symbols + "종목"],
-    ["분봉", fmt(d.minute_bars), "neu", "오늘 수집"],
+    ["실현손익", sign(d.realized_krw, 0) + "원", cls(d.realized_krw), "🗓 오늘 청산분"],
+    ["오늘 청산", d.closed_today + "건", "neu", "🗓 오늘 매매"],
+    ["현재 보유", d.open_positions + "종목", "neu", "📍 지금(단타 봇 추적분)"],
+    ["승률(익절)", d.winrate + "%", d.winrate >= 50 ? "pos" : "neg", "🗓 오늘 청산 기준"],
+    ["스캔 수집", fmt(d.scans_today), "neu", "🗓 오늘 · 반등후보 " + d.rebound_symbols + "종목"],
+    ["분봉", fmt(d.minute_bars), "neu", "🗓 오늘 수집"],
     ["모델 OOS IC", ic == null ? "—" : sign(ic, 3), ic == null ? "" : (ic > 0.05 ? "pos" : "neu"),
-      d.model ? (d.model.kind || "") : "모델없음"],
+      "📚 누적 학습 · " + (d.model ? (d.model.kind || "") : "모델없음")],
   ];
   $("#kpis").innerHTML = cards.map(([l, v, c, s]) =>
     `<div class="card"><div class="label">${l}</div><div class="value ${c}">${v}</div>
