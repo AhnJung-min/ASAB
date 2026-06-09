@@ -264,14 +264,25 @@ class SurgeBot:
         """
         if not candidates:
             return
-        scored = [c for c in candidates if c.get("ob_imbalance") is not None
-                  and c["ob_imbalance"] >= self.min_imbalance]
-        keys = {
-            "imbalance": lambda c: c.get("ob_imbalance", -1.0),
-            "value": lambda c: c.get("value", 0),
-            "rate": lambda c: c.get("rate", 0.0),
-        }
-        scored.sort(key=keys.get(self.rank_by, keys["imbalance"]), reverse=True)
+        # 매수 제외 = '호가가 확인됐고 매도세 우위(imbalance < min)'인 경우만.
+        # 호가 미수집(None=한도 등으로 못 받음)은 제외하지 않는다 — 호가 실패가
+        # 거래를 막아 봇이 멈추는 취약점 방지(거래대금 기준으로라도 매수).
+        def _keep(c: dict) -> bool:
+            ob = c.get("ob_imbalance")
+            return ob is None or ob >= self.min_imbalance
+        scored = [c for c in candidates if _keep(c)]
+        # 정렬: 매수세 우위(임밸런스 큰)부터, 호가 미수집은 그다음(거래대금순).
+        # rank_by 와 무관하게 '있는 임밸런스 우선 → 없으면 거래대금' 으로 안정화.
+        def _key(c: dict):
+            ob = c.get("ob_imbalance")
+            has = ob is not None
+            primary = ob if has else 0.0
+            if self.rank_by == "value":
+                primary = c.get("value", 0)
+            elif self.rank_by == "rate":
+                primary = c.get("rate", 0.0)
+            return (has, primary, c.get("value", 0))
+        scored.sort(key=_key, reverse=True)
         candidates[:] = scored
 
     def filter_candidates(self, scanned: list[dict]) -> list[dict]:
