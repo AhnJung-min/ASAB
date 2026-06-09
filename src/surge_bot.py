@@ -378,9 +378,8 @@ class SurgeBot:
                 log(f"  매도 오류 {sym}: {e}")
 
     def _enter_new(self, now: datetime) -> None:
-        room = self.max_positions - len(self.positions) - len(self.pending_buys)
-        if room <= 0:
-            return
+        # 스캔·저장·호가수집은 '항상' 실행한다(보유가 꽉 차도 학습 데이터는 계속 쌓임).
+        # 매수만 빈자리가 있을 때 한다. (스캔과 매수를 분리)
         scanned = self.scan()
         idx_chg = self._index_change()               # 시장 국면(지수 등락률)
         for r in scanned:
@@ -388,13 +387,18 @@ class SurgeBot:
         if scanned:
             self.store.save_surge_scan(now.strftime("%Y-%m-%d %H:%M:%S"), scanned)
         candidates = self.filter_candidates(scanned)
-        self._capture_orderbook(candidates, now)     # 상위 후보 호가 임밸런스 수집·부착
+        self._capture_orderbook(candidates, now)     # 상위 후보 호가 임밸런스 수집·부착(학습 피처)
         self._rank_by_pressure(candidates)           # 매수세 우위 필터 + 거래대금/임밸런스 정렬
         self._apply_model(candidates, len(scanned))  # 모델 있으면 ML점수로 재정렬·필터(우선)
+
+        room = self.max_positions - len(self.positions) - len(self.pending_buys)
         if self.dry_run:
             tag = " · ML점수순" if self._model_bundle and self.use_model else ""
             log(f"  스캔 {len(scanned)}종목 · 필터 통과 {len(candidates)}종목 · "
                 f"빈자리 {room} · 지수 {idx_chg:+.2f}%{tag}")
+        # 빈자리 없으면 매수만 건너뛴다(스캔·저장은 위에서 이미 완료 → 데이터는 계속 흐름).
+        if room <= 0:
+            return
         # 지수 국면 필터: 시장이 급락 중이면 신규 매수 중단(데이터 수집·청산은 계속)
         if self.regime_filter and idx_chg < self.regime_min_chg:
             log(f"  🚫 지수 국면 OFF (지수 {idx_chg:+.2f}% < {self.regime_min_chg}%) "
