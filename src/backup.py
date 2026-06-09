@@ -27,9 +27,20 @@ from .data.store import DB_PATH
 
 
 def _row_count(db: Path) -> int:
+    """백업 트리거용 '활동량' = 일봉 + 단타 스캔 행수.
+
+    일봉(daily_price)은 백필 때만 늘고, 단타(surge_scan)는 봇 돌 때 는다.
+    둘을 합쳐야 어느 국면이든 데이터 증가를 감지한다.
+    """
     con = sqlite3.connect(db, timeout=30)
     try:
-        return con.execute("SELECT COUNT(*) FROM daily_price").fetchone()[0]
+        total = 0
+        for tbl in ("daily_price", "surge_scan"):
+            try:
+                total += con.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
+            except sqlite3.OperationalError:
+                pass  # 테이블 없으면 0
+        return total
     finally:
         con.close()
 
@@ -66,6 +77,9 @@ def main() -> None:
     ap.add_argument("--threshold", type=int, default=5000,
                     help="[watch] 이만큼 행이 늘면 백업 (기본 5000행 ≈ 종목 2개)")
     ap.add_argument("--interval", type=int, default=300, help="[watch] 감시 주기(초)")
+    ap.add_argument("--max-age", type=int, default=1800,
+                    help="[watch] 행 증가가 없어도 이 시간(초)마다 무조건 백업 (기본 30분). "
+                         "0이면 비활성(행 증가시에만)")
     ap.add_argument("--keep", type=int, default=3, help="보관할 타임스탬프 사본 수")
     args = ap.parse_args()
     dest = Path(args.dest)
@@ -75,15 +89,20 @@ def main() -> None:
 
     if args.watch:
         last = -1
-        log(f"백업 감시 시작 → {dest}  (행 {args.threshold:,}개 증가마다)")
+        last_backup = 0.0
+        log(f"백업 감시 시작 → {dest}  (행 {args.threshold:,}개 증가 또는 "
+            f"{args.max_age}초마다)")
         while True:
             try:
                 cur = _row_count(DB_PATH)
-                if last < 0 or cur - last >= args.threshold:
+                aged = args.max_age > 0 and (time.time() - last_backup) >= args.max_age
+                if last < 0 or cur - last >= args.threshold or aged:
                     p = snapshot(dest, args.keep)
                     sz = p.stat().st_size / 1e6
-                    log(f"백업 완료: 일봉 {cur:,}행 ({sz:.0f}MB) → {p.name}")
+                    why = "시간" if (aged and cur - last < args.threshold and last >= 0) else "증가"
+                    log(f"백업 완료({why}): 활동 {cur:,}행 ({sz:.0f}MB) → {p.name}")
                     last = cur
+                    last_backup = time.time()
             except Exception as e:  # noqa: BLE001
                 log(f"백업 오류: {e}")
             time.sleep(args.interval)
