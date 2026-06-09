@@ -18,11 +18,11 @@ from .config import Config
 _RATE_LIMIT_CODE = "EGW00201"
 # 토큰 무효/만료 에러코드(서버가 토큰 거부) → 재발급 후 재시도
 _TOKEN_ERR_CODES = {"EGW00121", "EGW00123", "EGW00105"}
-# 요청 간 최소 간격(초). 모의투자 서버는 초당 한도(EGW00201)가 빡빡해
-# 보수적으로 0.6초(≈초당 1.6회) — 단타 봇의 주기당 호출 폭주를 한도 아래로 억제.
-_MIN_INTERVAL = 0.6
-# 한도 초과 시 최대 재시도 횟수
-_MAX_RETRY = 4
+# 요청 간 최소 간격(초). 모의투자 서버는 원장(잔고·주문) 초당 한도(EGW00201)가
+# 특히 빡빡해 0.8초(≈초당 1.25회)로 보수적 — 주문·잔고가 몰려도 한도 아래로 억제.
+_MIN_INTERVAL = 0.8
+# 한도 초과 시 최대 재시도 횟수. 잠깐의 초과를 조용히 흡수하도록 넉넉히(6회).
+_MAX_RETRY = 6
 
 
 class KISClient:
@@ -102,7 +102,8 @@ class KISClient:
                 if e.code != _RATE_LIMIT_CODE:
                     raise
                 last_err = e
-                time.sleep(0.5 * (2 ** attempt))  # 지수 백오프
+                # 초당 한도는 1~2초면 풀리므로 백오프 상한 2초(6회 재시도 흡수용)
+                time.sleep(min(0.5 * (2 ** attempt), 2.0))
             except requests.exceptions.RequestException as e:
                 # 네트워크 끊김(RemoteDisconnected)·타임아웃 등도 재시도.
                 # (안 하면 백필 중 끊겨 과거 데이터가 잘린 채 남는 버그)
