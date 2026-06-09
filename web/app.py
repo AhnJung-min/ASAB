@@ -233,6 +233,48 @@ def rebound():
         con.close()
 
 
+_dom = None
+
+
+def _domestic():
+    """KIS 도메스틱 클라이언트(라이브 잔고용). 1회 생성 후 재사용."""
+    global _dom
+    if _dom is None:
+        import os
+        os.chdir(ROOT)  # config.yaml / .token_cache 등 상대경로 기준을 ASAB 루트로
+        sys.path.insert(0, str(ROOT))
+        from src.kis.client import KISClient
+        from src.kis.config import load_config
+        from src.kis.domestic import DomesticStock
+        _dom = DomesticStock(KISClient(load_config(ROOT / "config.yaml")))
+    return _dom
+
+
+@app.route("/api/live_account")
+def live_account():
+    """실제 KIS 모의계좌를 지금 직접 조회(전체 보유 + 현금). 대시보드 DB와 무관."""
+    try:
+        bal = _domestic().balance()
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": str(e)}), 200
+    holdings = sorted(bal.get("holdings", []), key=lambda h: -h.get("eval_amt", 0))
+    hk = sum(h.get("eval_amt", 0) for h in holdings)
+    pnl = sum(h.get("pnl", 0) for h in holdings)
+    total = bal.get("total") or (bal["cash"] + hk)
+    from datetime import datetime
+    return jsonify({
+        "ts": datetime.now().strftime("%H:%M:%S"),
+        "cash": bal["cash"], "holdings_krw": hk, "total": total, "unrealized": pnl,
+        "holdings": [{
+            "name": h.get("name"), "symbol": h.get("symbol"), "qty": h.get("qty"),
+            "avg_price": h.get("avg_price"), "eval_amt": h.get("eval_amt"),
+            "pnl": h.get("pnl"),
+            "pnl_pct": round((h.get("eval_amt", 0) / (h.get("avg_price", 1) * h.get("qty", 1)) - 1) * 100, 2)
+                       if h.get("avg_price") and h.get("qty") else None,
+        } for h in holdings],
+    })
+
+
 @app.route("/")
 def index():
     return render_template("index.html")

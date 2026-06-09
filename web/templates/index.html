@@ -19,7 +19,8 @@
 
   <nav class="tabs">
     <button class="tab active" data-tab="overview">개요</button>
-    <button class="tab" data-tab="trades">매매</button>
+    <button class="tab" data-tab="account">실제 계좌</button>
+    <button class="tab" data-tab="trades">단타 매매</button>
     <button class="tab" data-tab="scan">스캔</button>
     <button class="tab" data-tab="symbol">종목 차트</button>
     <button class="tab" data-tab="rebound">하락·반등</button>
@@ -39,6 +40,16 @@
       </div>
       <div class="panel">
         <h3>시간대별 활동 (매수 / 스캔)</h3><canvas id="activityChart" height="90"></canvas>
+      </div>
+    </section>
+
+    <!-- 실제 계좌 (라이브) -->
+    <section id="account" class="page">
+      <div class="panel">
+        <h3>실제 KIS 모의계좌 <span class="pill">라이브 조회</span> <span id="acctTs" class="pill"></span></h3>
+        <div class="cards" id="acctKpis"></div>
+        <div class="tablewrap"><table id="acctTable"></table></div>
+        <p class="symmeta">이 탭은 KIS를 실시간 조회한 <b>실제 계좌 전부</b>입니다(단타+일봉로테이션+기타). 개요 탭의 단타 봇 뷰와 다를 수 있습니다.</p>
       </div>
     </section>
 

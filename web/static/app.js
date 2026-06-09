@@ -21,7 +21,29 @@ document.querySelectorAll(".tab").forEach((t) => t.onclick = () => {
   if (t.dataset.tab === "rebound") loadRebound();
   if (t.dataset.tab === "scan") loadScan();
   if (t.dataset.tab === "trades") loadTrades();
+  if (t.dataset.tab === "account") loadAccount();
 });
+
+// ---------- 실제 계좌 (라이브) ----------
+async function loadAccount() {
+  $("#acctTs").textContent = "조회 중…";
+  const d = await api("/api/live_account");
+  if (d.error) { $("#acctKpis").innerHTML = `<div class="card"><div class="label">조회 실패</div><div class="value neg" style="font-size:15px">${d.error}</div></div>`; $("#acctTable").innerHTML = ""; $("#acctTs").textContent = ""; return; }
+  $("#acctTs").textContent = d.ts;
+  const cards = [
+    ["총자산", fmt(d.total) + "원", ""],
+    ["예수금(현금)", fmt(d.cash) + "원", "neu"],
+    ["평가금액", fmt(d.holdings_krw) + "원", ""],
+    ["평가손익", sign(d.unrealized, 0) + "원", cls(d.unrealized)],
+    ["보유 종목", d.holdings.length + "종목", "neu"],
+  ];
+  $("#acctKpis").innerHTML = cards.map(([l, v, c]) =>
+    `<div class="card"><div class="label">${l}</div><div class="value ${c}">${v}</div></div>`).join("");
+  $("#acctTable").innerHTML = thead(["종목", "코드", "수량", "평균단가", "평가금액", "손익률"]) +
+    "<tbody>" + d.holdings.map((h) => `<tr><td>${h.name}</td><td>${h.symbol}</td>
+      <td>${fmt(h.qty)}</td><td>${fmt(h.avg_price)}</td><td>${fmt(h.eval_amt)}</td>
+      <td class="${cls(h.pnl_pct)}">${h.pnl_pct == null ? "—" : sign(h.pnl_pct)}%</td></tr>`).join("") + "</tbody>";
+}
 
 // ---------- 개요 ----------
 async function loadOverview() {
