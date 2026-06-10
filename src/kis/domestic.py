@@ -218,6 +218,34 @@ class DomesticStock:
              ord_dvsn: str | None = None) -> dict[str, Any]:
         return self._order(symbol, qty, "sell", price, ord_dvsn)
 
+    @staticmethod
+    def order_ids(res: dict[str, Any]) -> tuple[str, str]:
+        """주문 응답에서 (주문번호 ODNO, 거래소조직번호 KRX_FWDG_ORD_ORGNO) 추출.
+        취소/정정 호출에 필요하다. 없으면 빈 문자열."""
+        out = res.get("output") or {}
+        return str(out.get("ODNO", "") or ""), str(out.get("KRX_FWDG_ORD_ORGNO", "") or "")
+
+    def cancel_order(self, order_no: str, qty: int, *, org_no: str = "") -> dict[str, Any]:
+        """미체결 주문 전량 취소. (주식주문 정정취소 — 신TR TTTC0013U/VTTC0013U)
+
+        이미 체결된 주문은 KIS 가 오류를 반환한다(호출측에서 체결로 간주 처리).
+        """
+        tr_id = "VTTC0013U" if self.paper else "TTTC0013U"
+        body = {
+            "CANO": self.c.config.account_no,
+            "ACNT_PRDT_CD": self.c.config.account_product_code,
+            "KRX_FWDG_ORD_ORGNO": org_no or "",
+            "ORGN_ODNO": str(order_no),
+            "ORD_DVSN": "00",
+            "RVSE_CNCL_DVSN_CD": "02",   # 02=취소 (01=정정)
+            "ORD_QTY": str(qty),
+            "ORD_UNPR": "0",
+            "QTY_ALL_ORD_YN": "Y",       # 잔량 전부 취소
+        }
+        return self.c.post(
+            "/uapi/domestic-stock/v1/trading/order-rvsecncl", tr_id=tr_id, body=body
+        )
+
     # --- 잔고 ---------------------------------------------------------------
     def balance(self) -> dict[str, Any]:
         """보유 종목 및 예수금 조회.

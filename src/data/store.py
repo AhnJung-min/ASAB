@@ -245,7 +245,8 @@ class DataStore:
                           {"rank": "INTEGER", "source": "TEXT", "index_chg": "REAL"})
         self._add_columns("surge_trade",
                           {"entry_rank": "INTEGER", "entry_nscan": "INTEGER",
-                           "entry_ob_imbalance": "REAL"})
+                           "entry_ob_imbalance": "REAL",
+                           "peak_price": "REAL"})  # 트레일링 고점(재시작 시 복원용)
 
     def _add_columns(self, table: str, cols: dict[str, str]) -> None:
         cur = self.conn.execute(
@@ -614,6 +615,12 @@ class DataStore:
     def delete_trade(self, trade_id: int) -> None:
         """미체결 취소 등으로 무효가 된 행 제거."""
         self.conn.execute("DELETE FROM surge_trade WHERE id=?", (trade_id,))
+        self.conn.commit()
+
+    def update_trade_peak(self, trade_id: int, peak: float) -> None:
+        """보유 중 최고가 영속화 — 재시작해도 트레일링 기준이 유지되게."""
+        self.conn.execute(
+            "UPDATE surge_trade SET peak_price=? WHERE id=?", (peak, trade_id))
         self.conn.commit()
 
     def close_trade(self, trade_id: int, exit_ts: str, exit_price: float,

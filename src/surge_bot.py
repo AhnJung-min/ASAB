@@ -139,6 +139,7 @@ class SurgeBot:
         self.pending_buys: dict[str, dict] = {}  # symbol -> {entry_rate, volume, name, ts}
         self.pending_sells: dict[str, dict] = {}  # symbol -> {reason, exit_price}
         self.recent_exits: dict[str, datetime] = {}  # symbol -> 마지막 청산시각(재진입 쿨다운)
+        self._regime_off = False  # 지수 국면 OFF 상태(로그 도배 방지용)
 
         if not dry_run:
             self._resume_open_trades()
@@ -147,9 +148,11 @@ class SurgeBot:
         for t in self.store.open_trades():
             if t["entry_rate"] is None:
                 continue  # entry_rate 없는 행=옛 인수(orphan) 잔재 → 관리 대상 아님
+            keys = t.keys()
+            peak = (t["peak_price"] if "peak_price" in keys else None) or t["entry_price"]
             self.positions[t["symbol"]] = {
                 "trade_id": t["id"], "entry_price": t["entry_price"],
-                "peak": t["entry_price"], "qty": t["qty"],
+                "peak": peak, "qty": t["qty"],   # peak 영속분 복원(트레일링 유지)
                 "entry_ts": t["entry_ts"], "name": t["name"],
             }
         if self.positions:
@@ -323,7 +326,7 @@ class SurgeBot:
         held = {h["symbol"]: h for h in bal["holdings"]}
         if self.dry_run:
             # 주문·DB 변경 없이 스캔→필터→매수신호만 점검(보유 인수도 안 함)
-            self._enter_new(now)
+            self._enter_new(now, held)
             return
         self._save_account(now, bal)
 
@@ -331,7 +334,7 @@ class SurgeBot:
         self._reconcile_sells(held, now)
         self._cleanup_vanished(held, now)
         self._check_exits(held, now)
-        self._enter_new(now)
+        self._enter_new(now, held)
 
     def _save_account(self, now: datetime, bal: dict) -> None:
         hk = sum(h["eval_amt"] for h in bal["holdings"])
@@ -350,16 +353,36 @@ class SurgeBot:
         for sym, meta in list(self.pending_buys.items()):
             if sym in held and held[sym]["qty"] > 0:
                 h = held[sym]
-                # 주문때 만든 임시기록을 실제 체결가/수량으로 갱신
-                self.store.update_trade_fill(meta["trade_id"], h["avg_price"], h["qty"])
+                # 봇 포지션 수량은 '주문 수량'을 상한으로 — 계좌를 로테이션 봇과
+                # 공유할 때 남의 보유분(held qty 초과분)을 흡수해 같이 팔던 사고 방지.
+                ordered = int(meta.get("qty", 0)) or h["qty"]
+                fill_qty = min(ordered, h["qty"])
+                shared = h["qty"] > ordered
+                # 공유 보유면 계좌 평균단가가 오염돼 있으므로 주문 시점 가격을 유지
+                entry_px = meta.get("est_price") if shared else h["avg_price"]
+                entry_px = entry_px or h["avg_price"]
+                self.store.update_trade_fill(meta["trade_id"], entry_px, fill_qty)
                 self.positions[sym] = {
-                    "trade_id": meta["trade_id"], "entry_price": h["avg_price"],
-                    "peak": h["avg_price"], "qty": h["qty"], "entry_ts": now,
+                    "trade_id": meta["trade_id"], "entry_price": entry_px,
+                    "peak": entry_px, "qty": fill_qty, "entry_ts": now,
                     "name": meta["name"]}
-                log(f"  ✅ 진입체결: {meta['name']}({sym}) {h['qty']}주 @ {h['avg_price']:,.0f}원")
+                tag = " (계좌 공유 — 주문분만 관리)" if shared else ""
+                log(f"  ✅ 진입체결: {meta['name']}({sym}) {fill_qty}주 @ {entry_px:,.0f}원{tag}")
                 del self.pending_buys[sym]
             elif (now - meta["ts"]).total_seconds() > 120:
-                # 미체결 → 임시기록 삭제(주문이 안 잡힘)
+                # 미체결 → 거래소의 실제 주문부터 취소(안 하면 나중에 몰래 체결돼
+                # 봇이 모르는 유령 보유가 계좌에 남는다). 그 다음 기록 삭제.
+                if meta.get("order_no"):
+                    try:
+                        self.dom.cancel_order(meta["order_no"], int(meta.get("qty", 1)),
+                                              org_no=meta.get("org_no", ""))
+                    except KISApiError as e:
+                        # 취소 실패 = 대개 이미 체결됨(다음 주기에 held 로 잡힘) 또는 일시 오류
+                        meta["cancel_fail"] = meta.get("cancel_fail", 0) + 1
+                        if meta["cancel_fail"] < 3:
+                            log(f"  ⏳ 매수취소 실패(재시도 예정) {meta['name']}({sym}): {e}")
+                            continue   # pending 유지 → 체결이면 정상 진입 처리됨
+                        log(f"  ⚠️ 매수취소 {meta['cancel_fail']}회 실패 — 추적 포기 {sym}: {e}")
                 self.store.delete_trade(meta["trade_id"])
                 log(f"  ⏳ 미체결 매수 취소: {meta['name']}({sym})")
                 del self.pending_buys[sym]
@@ -376,8 +399,12 @@ class SurgeBot:
 
     def _reconcile_sells(self, held: dict, now: datetime) -> None:
         for sym, meta in list(self.pending_sells.items()):
-            if sym not in held or held[sym]["qty"] == 0:
-                pos = self.positions.get(sym)
+            # 공유 계좌 대비: '계좌에서 사라짐'이 아니라 '봇 매도수량만큼 줄었는지'로
+            # 체결을 판정하긴 어려우므로, 보유 자체가 없어졌거나 수량이 줄었으면 체결로 본다.
+            pos = self.positions.get(sym)
+            sold = sym not in held or held[sym]["qty"] == 0 or (
+                pos and held[sym]["qty"] < pos["qty"])
+            if sold:
                 if pos:
                     exit_px = meta["exit_price"]
                     pnl = (exit_px - pos["entry_price"]) * pos["qty"]
@@ -391,6 +418,22 @@ class SurgeBot:
                     self.positions.pop(sym, None)
                     self.recent_exits[sym] = now   # 재진입 쿨다운 시작
                 self.pending_sells.pop(sym, None)
+            elif (now - meta.get("ts", now)).total_seconds() > 120:
+                # 매도 미체결(가격이 지정가 아래로 급락 등) → 주문 취소 후 pending 해제.
+                # 포지션은 남아있으므로 다음 주기 _check_exits 가 현재가로 재매도한다.
+                # (방치하면 손실이 커져도 영원히 재주문이 안 나가는 구멍)
+                try:
+                    if meta.get("order_no"):
+                        self.dom.cancel_order(meta["order_no"], int(meta.get("qty", 1)),
+                                              org_no=meta.get("org_no", ""))
+                    log(f"  🔁 매도 미체결 취소 → 재시도 예정: {sym} [{meta['reason']}]")
+                    self.pending_sells.pop(sym, None)
+                except KISApiError as e:
+                    meta["cancel_fail"] = meta.get("cancel_fail", 0) + 1
+                    if meta["cancel_fail"] >= 3:
+                        # 취소가 계속 실패 = 체결 직전/이미 체결 가능성 → 해제하고 흐름에 맡김
+                        log(f"  ⚠️ 매도취소 3회 실패 — pending 해제 {sym}: {e}")
+                        self.pending_sells.pop(sym, None)
 
     def _hold_seconds(self, pos: dict, now: datetime) -> float:
         """보유 경과초. entry_ts 가 datetime(신규)이든 문자열(복구분)이든 처리."""
@@ -410,7 +453,10 @@ class SurgeBot:
                 price = self.dom.current_price(sym, self.quote_market)
             except KISApiError:
                 continue
-            pos["peak"] = max(pos["peak"], price)
+            if price > pos["peak"]:
+                pos["peak"] = price
+                # 고점 영속화 — 재시작해도 트레일링 기준 유지
+                self.store.update_trade_peak(pos["trade_id"], price)
             pnl_pct = (price / pos["entry_price"] - 1) * 100 if pos["entry_price"] else 0.0
             drawdown = (price / pos["peak"] - 1) * 100 if pos["peak"] else 0.0
 
@@ -433,15 +479,21 @@ class SurgeBot:
                     f"손익{pnl_pct:+.1f}% [{reason}]")
                 continue
             try:
-                self.dom.sell(sym, pos["qty"], limit)
-                self.pending_sells[sym] = {"reason": reason, "exit_price": price}
+                res = self.dom.sell(sym, pos["qty"], limit)
+                odno, orgno = self.dom.order_ids(res)
+                # exit_price 는 지정가(limit)로 기록 — 주문시점 현재가보다 보수적
+                # (실체결가에 가깝게; 검증 데이터의 낙관 편향 방지)
+                self.pending_sells[sym] = {
+                    "reason": reason, "exit_price": limit, "ts": now,
+                    "order_no": odno, "org_no": orgno, "qty": pos["qty"]}
                 log(f"  📤 매도주문: {pos['name']}({sym}) @ {price:,}원→지정가{limit:,} [{reason}]")
             except KISApiError as e:
                 log(f"  매도 오류 {sym}: {e}")
 
-    def _enter_new(self, now: datetime) -> None:
+    def _enter_new(self, now: datetime, held: dict | None = None) -> None:
         # 스캔·저장·호가수집은 '항상' 실행한다(보유가 꽉 차도 학습 데이터는 계속 쌓임).
         # 매수만 빈자리가 있을 때 한다. (스캔과 매수를 분리)
+        held = held or {}
         scanned = self.scan()
         idx_chg = self._index_change()               # 시장 국면(지수 등락률)
         for r in scanned:
@@ -450,6 +502,9 @@ class SurgeBot:
             self.store.save_surge_scan(now.strftime("%Y-%m-%d %H:%M:%S"), scanned)
         self._capture_rebound_orderbook(scanned, now)  # 하락 반등 후보 호가 수집(데이터용)
         candidates = self.filter_candidates(scanned)
+        # 계좌에 이미 있는 종목(로테이션 봇 보유 포함)은 신규 매수 금지 —
+        # 같은 종목을 더 사면 체결확인/평균단가가 남의 보유분과 섞여 오염된다.
+        candidates = [c for c in candidates if c["symbol"] not in held]
         self._capture_orderbook(candidates, now)     # 상위 후보 호가 임밸런스 수집·부착(학습 피처)
         self._rank_by_pressure(candidates)           # 매수세 우위 필터 + 거래대금/임밸런스 정렬
         self._apply_model(candidates, len(scanned))  # 모델 있으면 ML점수로 재정렬·필터(우선)
@@ -464,9 +519,14 @@ class SurgeBot:
             return
         # 지수 국면 필터: 시장이 급락 중이면 신규 매수 중단(데이터 수집·청산은 계속)
         if self.regime_filter and idx_chg < self.regime_min_chg:
-            log(f"  🚫 지수 국면 OFF (지수 {idx_chg:+.2f}% < {self.regime_min_chg}%) "
-                f"— 신규 매수 중단")
+            if not self._regime_off:   # 상태가 바뀔 때만 로그(도배 방지)
+                log(f"  🚫 지수 국면 OFF (지수 {idx_chg:+.2f}% < {self.regime_min_chg}%) "
+                    f"— 신규 매수 중단")
+                self._regime_off = True
             return
+        if self._regime_off:
+            log(f"  ✅ 지수 국면 복귀 (지수 {idx_chg:+.2f}%) — 매수 재개")
+            self._regime_off = False
         for r in candidates[:room]:
             sym = r["symbol"]
             limit = limit_price("buy", r["price"], self.buy_band_bps)
@@ -490,19 +550,23 @@ class SurgeBot:
                     f"@ {r['price']:,}원 x{qty} ({ord_txt})")
                 continue
             try:
-                self.dom.buy(sym, qty, ord_price, ord_dvsn=ord_dvsn)
+                res = self.dom.buy(sym, qty, ord_price, ord_dvsn=ord_dvsn)
+                odno, orgno = self.dom.order_ids(res)   # 미체결 취소에 필요
                 # 주문 즉시 기록(임시 진입가=현재 추정가). 체결되면 _reconcile_buys가 실제가로 갱신.
                 # 이렇게 해야 --once/재시작에도 봇이 자기 포지션을 잃지 않는다.
+                est_price = ord_price or r["price"]
                 tid = self.store.open_trade({
                     "symbol": sym, "name": r["name"], "market": "",
                     "entry_ts": now.strftime("%Y-%m-%d %H:%M:%S"),
-                    "entry_price": ord_price or r["price"], "qty": qty,
+                    "entry_price": est_price, "qty": qty,
                     "entry_rate": r["rate"], "entry_volume": r["volume"],
                     "entry_rank": r.get("rank"), "entry_nscan": len(scanned),
                     "entry_ob_imbalance": r.get("ob_imbalance")})
                 self.pending_buys[sym] = {
                     "trade_id": tid, "entry_rate": r["rate"], "volume": r["volume"],
-                    "name": r["name"], "ts": now}
+                    "name": r["name"], "ts": now,
+                    "qty": qty, "est_price": est_price,        # 공유계좌 오염 방지용
+                    "order_no": odno, "org_no": orgno}          # 미체결 취소용
                 log(f"  📥 매수주문: {r['name']}({sym}) +{r['rate']:.1f}% "
                     f"@ {r['price']:,}원 x{qty} → {ord_txt}")
             except KISApiError as e:
