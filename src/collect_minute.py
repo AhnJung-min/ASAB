@@ -24,10 +24,12 @@ from .data.store import DataStore
 from .kis.client import KISApiError, KISClient
 from .kis.config import load_config
 from .kis.domestic import DomesticStock
+from .kis.marketdata import MarketData
 
 _OPEN = "090000"
 _CLOSE = "153000"
 _MAX_PAGES = 20   # 안전상한(하루 390분 / 30봉 ≈ 13페이지)
+_DAILY_BACKFILL_MONTHS = 2   # 일봉 보충 깊이(RVOL 분모는 20일 평균이면 충분)
 
 
 def log(msg: str) -> None:
@@ -63,6 +65,46 @@ def fetch_day(dom: DomesticStock, symbol: str) -> list[dict]:
     return sorted(bars.values(), key=lambda b: b["time"])
 
 
+def backfill_missing_daily(client: KISClient, store: DataStore, date: str) -> None:
+    """당일 스캔에 등장했지만 일봉이 없는(또는 오래된) 개별주의 일봉을 짧게 백필.
+
+    목적: 단타봇 RVOL 피처의 분모(20일 평균거래량)가 daily_price 기반이라,
+    일봉이 없는 신규상장·신형코드 종목은 rvol=NULL 로 기록됨(스캔의 ~28%).
+    ETF/레버리지는 단타 매수 대상이 아니므로 건너뛴다(호출량 절약).
+    """
+    from .collect import backfill_daily
+    from .surge_bot import is_etf, is_leverage_inverse
+
+    cutoff = (datetime.now() - timedelta(days=7)).strftime("%Y%m%d")
+    rows = store.conn.execute(
+        "SELECT DISTINCT symbol, name FROM surge_scan WHERE substr(ts,1,10)=?",
+        (date,)).fetchall()
+    todo = []
+    for r in rows:
+        if is_etf(r["name"]) or is_leverage_inverse(r["name"]):
+            continue
+        ld = store.latest_date(r["symbol"])
+        if ld is None or ld < cutoff:   # 일봉 없음 또는 1주 이상 공백
+            todo.append((r["symbol"], r["name"]))
+    if not todo:
+        log("일봉 보충: 대상 없음(스캔 종목 전부 최신).")
+        return
+
+    log(f"일봉 보충 시작: {len(todo)}종목 (RVOL 결손 방지, {_DAILY_BACKFILL_MONTHS}개월)")
+    md = MarketData(client)
+    n_ok = 0
+    for i, (sym, name) in enumerate(todo, 1):
+        try:
+            n = backfill_daily(md, store, sym, _DAILY_BACKFILL_MONTHS)
+            if n > 0:
+                n_ok += 1
+            if i % 20 == 0 or i == len(todo):
+                log(f"  [{i}/{len(todo)}] 일봉 채움 {n_ok}종목")
+        except Exception as e:  # 한 종목 오류로 전체가 죽지 않게  # noqa: BLE001
+            log(f"  일봉 보충 오류 {name}({sym}): {e}")
+    log(f"일봉 보충 완료: {n_ok}/{len(todo)}종목.")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="EOD 분봉 수집(급등주 스캔 종목)")
     ap.add_argument("--limit", type=int, default=0, help="대상 종목 수 제한(0=전체)")
@@ -80,20 +122,23 @@ def main() -> None:
 
     log(f"분봉 수집 대상일 {date} · 스캔종목 {len(symbols)} · "
         f"이미수집 {len(done)} · 이번 {len(todo)}")
-    if not todo:
-        log("수집할 종목이 없습니다(스캔 데이터 없음 또는 이미 완료).")
-        store.close()
-        return
+    client = KISClient(load_config())
+    if todo:
+        dom = DomesticStock(client)
+        total_bars = 0
+        for i, sym in enumerate(todo, 1):
+            bars = fetch_day(dom, sym)
+            if bars:
+                total_bars += store.save_minute_bars(sym, bars)
+            if i % 20 == 0 or i == len(todo):
+                log(f"  [{i}/{len(todo)}] 누적 {total_bars:,}봉")
+        log(f"완료. {len(todo)}종목 · {total_bars:,}봉 저장.")
+    else:
+        log("수집할 분봉이 없습니다(스캔 데이터 없음 또는 이미 완료).")
 
-    dom = DomesticStock(KISClient(load_config()))
-    total_bars = 0
-    for i, sym in enumerate(todo, 1):
-        bars = fetch_day(dom, sym)
-        if bars:
-            total_bars += store.save_minute_bars(sym, bars)
-        if i % 20 == 0 or i == len(todo):
-            log(f"  [{i}/{len(todo)}] 누적 {total_bars:,}봉")
-    log(f"완료. {len(todo)}종목 · {total_bars:,}봉 저장.")
+    # 일봉이 빠진 스캔 종목 보충(RVOL 결손 방지) — 분봉과 같은 EOD 타이밍에 1회
+    if symbols:
+        backfill_missing_daily(client, store, date)
     store.close()
 
 
