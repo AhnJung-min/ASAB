@@ -90,8 +90,9 @@ def main() -> None:
     if args.watch:
         last = -1
         last_backup = 0.0
-        log(f"백업 감시 시작 → {dest}  (행 {args.threshold:,}개 증가 또는 "
-            f"{args.max_age}초마다)")
+        age_txt = f"{args.max_age // 60}분" if args.max_age % 60 == 0 else f"{args.max_age}초"
+        log(f"백업 감시 시작 → {dest}  (시작 시 즉시 1회 + 이후 행 "
+            f"{args.threshold:,}개 증가 또는 {age_txt}마다)")
         while True:
             try:
                 cur = _row_count(DB_PATH)
