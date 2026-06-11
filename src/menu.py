@@ -22,6 +22,8 @@ def _py(*args: str) -> list[str]:
 # (그룹명, [(라벨, [명령들], 설명, 위험여부), ...])
 MENU: list[tuple[str, list[tuple[str, list[list[str]], str, bool]]]] = [
     ("장중 단타 (Track 2)", [
+        ("하루 자동 운행 (무인)", [_py("-m", "src.run_day")],
+         "9시 대기→단타 봇→15:30 종료→분봉 수집→백업→18시 노트북 끄기", True),
         ("단타 봇 시작 (실매매)", [_py("-m", "src.surge_bot")],
          "스캔→매수→익절/손절 자동 반복. Ctrl+C 로 중지", True),
         ("단타 봇 점검 (주문 없음)", [_py("-m", "src.surge_bot", "--dry-run")],

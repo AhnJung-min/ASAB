@@ -662,7 +662,7 @@ class SurgeBot:
                 log(f"  매수 오류 {sym}: {e}")
 
     # --- 실행 ---------------------------------------------------------------
-    def run(self, once: bool = False) -> None:
+    def run(self, once: bool = False, until: str | None = None) -> None:
         mode = "DRY-RUN(주문안함)" if self.dry_run else (
             "모의투자" if self.cfg.paper_trading else "!! 실전투자 !!")
         log(f"국내 급등주 봇 시작 [{mode}] | 등락률 {self.min_rate}~{self.max_rate}% "
@@ -678,6 +678,10 @@ class SurgeBot:
         try:
             while True:
                 self.tick()
+                if until and datetime.now().strftime("%H:%M") >= until:
+                    log(f"⏰ {until} 도달 — 봇을 종료합니다.")
+                    self._report()
+                    break
                 time.sleep(self.interval)
         except KeyboardInterrupt:
             log("사용자 중지.")
@@ -697,8 +701,10 @@ def main() -> None:
     ap.add_argument("--once", action="store_true", help="1주기만 실행")
     ap.add_argument("--dry-run", action="store_true",
                     help="실제 주문 없이 스캔·신호 흐름만 점검(1주기)")
+    ap.add_argument("--until", metavar="HH:MM", default=None,
+                    help="해당 시각 도달 시 자동 종료 (예: 15:30)")
     args = ap.parse_args()
-    SurgeBot(dry_run=args.dry_run).run(once=args.once)
+    SurgeBot(dry_run=args.dry_run).run(once=args.once, until=args.until)
 
 
 if __name__ == "__main__":
