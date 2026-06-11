@@ -14,7 +14,7 @@
 | | **Track 1 · 일봉 로테이션** | **Track 2 · 장중 단타** |
 |---|---|---|
 | 전략 | 검증된 추세추종(blend top10 + 시장국면 필터) | 급등주 + 거래대금 유동주 단타 |
-| 주기 | 하루 1회 리밸런스 | 30초 폴링 |
+| 주기 | 하루 1회 리밸런스 | 45초 폴링 |
 | 상태 | ✅ 10년 워크포워드 검증 완료 | 🧪 데이터 수집·검증 단계(엣지 미입증) |
 
 > ⚠️ 두 봇은 **같은 모의계좌를 공유**하므로 **동시에 실행하지 마세요**.
@@ -36,10 +36,10 @@ ASAB.bat
 
 ```
 [장중 단타]      1.봇 시작⚠️  2.점검(주문없음)  3.1회테스트⚠️
-[단타 데이터]    4.분봉 수집   5.학습           6.청산 분석
+[단타 데이터]    4.분봉 수집(+일봉 보충)  5.학습  6.청산 분석
 [일봉 로테이션]  7.봇 시작⚠️  8.사전점검
 [데이터 관리]    9.일봉 업데이트  10.수집 이어하기  11.수급 백필
-[도구]          12.대시보드   13.백업          14.설치
+[도구]          12.웹 대시보드🌐  13.Streamlit  14.백업  15.설치
 ```
 ⚠️ = 실제(모의) 주문을 내는 항목(실행 전 확인 프롬프트). API 키 발급은
 [apiportal.koreainvestment.com](https://apiportal.koreainvestment.com) 에서 **모의투자**로.
@@ -79,13 +79,14 @@ python -m src.backtest --top-n 10      # 백테스트
 
 ## Track 2 · 장중 단타 (실험·데이터 수집 단계)
 
-급등주와 거래대금 상위(유동성) 종목을 30초마다 스캔해 단타하고, 모든 것을 학습 데이터로 쌓습니다.
+급등주와 거래대금 상위(유동성) 종목을 45초마다 스캔해 단타하고, 모든 것을 학습 데이터로 쌓습니다.
 
 **파이프라인:**
 ```
 [수집]  스캔(등락률∪거래대금, ETF·레버리지 제외) + RVOL + VWAP괴리 → surge_scan
         상위 후보 호가 잔량 임밸런스          → surge_orderbook
         장 마감 후 당일 분봉(편향 제거)        → minute_bar
+        └ 분봉 수집 직후, 일봉 없는 스캔 종목 자동 백필(RVOL 분모 결손 방지)
 [매매]  필터(상승중+유동성+지수국면) → 지정가/시장가 매수 → 익절/손절/트레일링
 [학습]  분봉 forward-return 라벨(비용+슬리피지 차감) → Ridge/LightGBM
 [분석]  분봉으로 청산 규칙 시뮬레이션(어떤 익절/손절이 최선인가)
@@ -126,12 +127,15 @@ python -m src.surge_exits           # 청산 규칙 분석
 
 ---
 
-## 대시보드
+## 대시보드 (2종)
 
 ```powershell
-python -m streamlit run dashboard.py   # 또는 ASAB.bat → 12
+python web/app.py                      # 단타 웹 대시보드 (ASAB.bat → 12) — 권장
+python -m streamlit run dashboard.py   # 종합 Streamlit (ASAB.bat → 13)
 ```
-백테스트 / 스크리너 / 계좌(원화 잔고·포지션·자산추이) / 수집현황 탭. http://localhost:8501
+- **웹 대시보드** (`web/`, Flask + Chart.js): 단타 중심. 개요(KPI·자산곡선·청산사유·
+  시간대활동) / 매매(보유·청산) / 스캔 / 종목 분봉차트 탭. http://localhost:8000
+- **Streamlit** (`dashboard.py`): 백테스트 / 스크리너 / 계좌 / 수집현황. http://localhost:8501
 
 ---
 
@@ -141,7 +145,8 @@ python -m streamlit run dashboard.py   # 또는 ASAB.bat → 12
 ASAB/
 ├─ ASAB.bat              # ★ 통합 실행 메뉴 (유일한 진입점)
 ├─ config.yaml.example   # 설정 템플릿
-├─ dashboard.py          # Streamlit 대시보드
+├─ dashboard.py          # Streamlit 종합 대시보드
+├─ web/                  # 단타 웹 대시보드(Flask + Chart.js, :8000)
 ├─ test_connection.py    # 인증/시세/잔고 점검(주문 없음)
 ├─ data/market.db        # 수집 데이터(SQLite, 정션링크 → D:)
 └─ src/
@@ -149,18 +154,21 @@ ASAB/
    ├─ kis/               # API 계층
    │  ├─ auth.py         #   OAuth 토큰(만료 자동 재발급·재시도)
    │  ├─ client.py       #   REST 공통(스로틀 0.35s·재시도·토큰갱신)
-   │  └─ domestic.py     #   시세/순위/호가/분봉/주문/잔고
+   │  ├─ domestic.py     #   시세/순위/호가/분봉/주문/잔고
+   │  ├─ marketdata.py   #   일봉/지수 시세 조회
+   │  └─ analytics.py    #   수급(공매도·신용·투자자·프로그램·대차)
    ├─ data/store.py      # SQLite 저장소(전 테이블·마이그레이션)
    │
    ├─ run_bot.py         # [T1] 일봉 로테이션 자동매매
    ├─ portfolio.py       #      타깃 선정(스크리너+국면필터)
    ├─ screener.py / ml_serve.py / features.py    # 점수·ML 서빙
    ├─ backtest.py / walkforward.py / tune_exits.py / strategy_compare.py  # 검증틀
+   ├─ research_vb.py     #      변동성돌파 검증(기각 근거 재현용)
    │
    ├─ surge_bot.py       # [T2] 장중 단타 봇
    ├─ surge_ml.py        #      단타 학습(Ridge/LightGBM, 비용·편향 반영)
    ├─ surge_exits.py     #      청산 규칙 분석
-   ├─ collect_minute.py  #      EOD 분봉 수집
+   ├─ collect_minute.py  #      EOD 분봉 수집 + 일봉 결손 자동 백필
    │
    ├─ collect.py universe.py collect_analytics.py  # 데이터 수집
    └─ backup.py          # 구글드라이브 백업
