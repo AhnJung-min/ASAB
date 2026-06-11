@@ -93,10 +93,12 @@ def run(source: str, top: int, months: int, limit: int | None,
     if not universe:
         store.close()
         return
-    # 벤치마크(KODEX200)는 ETF라 master 유니버스에서 빠짐 → 시장국면·상대강도용으로 항상 포함
-    BENCHMARK = "069500"
-    if not any(u["symbol"] == BENCHMARK for u in universe):
-        universe.append({"symbol": BENCHMARK, "name": "KODEX200(벤치마크)"})
+    # 벤치마크/국면 프록시 ETF는 master 유니버스(개별주)에서 빠짐 → 항상 포함.
+    # 069500=KODEX200(벤치마크·상대강도), 229200=KODEX코스닥150(단타 국면 게이트·연구용)
+    for bsym, bname in (("069500", "KODEX200(벤치마크)"),
+                        ("229200", "KODEX코스닥150(국면)")):
+        if not any(u["symbol"] == bsym for u in universe):
+            universe.append({"symbol": bsym, "name": bname})
     mode_txt = "증분 업데이트(최근 빠진 구간만)" if update else f"{months}개월 백필"
     log(f"  대상 {len(universe)}종목 · 일봉 {mode_txt} 시작")
 

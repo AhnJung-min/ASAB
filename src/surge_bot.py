@@ -115,8 +115,14 @@ class SurgeBot:
         # === 종목 선정 기준 (유동성·매수세 우위 중심) ===
         # 매수 전 호가 임밸런스가 이 값 이상인 종목만 매수(0=매수세 우위, 음수허용=-1)
         self.min_imbalance = float(s.get("min_imbalance", 0.0))
-        # 최종 매수 정렬 기준: imbalance(매수세) | value(거래대금) | rate(등락률)
+        # 최종 매수 정렬 기준: imbalance(매수세) | value(거래대금) | rate(등락률) | rvol(상대거래량)
         self.rank_by = str(s.get("rank_by", "imbalance")).lower()
+        # 상대거래량(RVOL) 하한. RVOL = 당일누적거래량 / (20일평균거래량 × 장경과비율).
+        # 'Stocks in Play'(평소보다 거래가 몰린 종목)만 단타하라는 해외 검증 결과
+        # (Zarattini·Barbon·Aziz 2024, 미국 7천종목 2016~2023: RVOL≥1 상위로 제한할
+        # 때만 유의미한 수익). 0=필터 끔(수집만). 켜려면 예: min_rvol: 1.0
+        self.min_rvol = float(s.get("min_rvol", 0.0))
+        self._avg_vol: dict[str, float] = self._load_avg_volumes()
         # === 하락 반등 데이터 수집 (수집 전용 — 매수는 안 함) ===
         # 하락률 상위 종목도 스캔해 surge_scan 에 적재(source='rebound'). 음수 등락률이라
         # 기존 매수 필터(min_rate>0)에 자동으로 안 걸려 매수 대상은 아니다.
@@ -127,7 +133,13 @@ class SurgeBot:
         # 재진입 쿨다운(분): 판 종목을 이 시간 동안 다시 안 산다(같은 종목 churn·휩쏘 방지).
         self.reentry_cooldown_sec = int(float(s.get("reentry_cooldown_min", 10)) * 60)
         self.regime_filter = bool(s.get("regime_filter", True))   # 지수 급락 시 매수 중단
-        self.regime_index = str(s.get("regime_index", "069500"))  # 국면 프록시(KODEX200)
+        # 국면 프록시 지수(쉼표로 복수 지정 가능). 게이트는 '최악값' 기준이라 하나만
+        # 급락해도 매수 중단. 기본 KODEX200+KODEX코스닥150 — 스캔 유니버스가 전체
+        # 시장(코스닥 다수)인데 코스피200만 보면 '코스닥 단독 급락'을 놓치기 때문
+        # (2016~26 일봉 분석: 코스닥150만 -1.5% 미만인 날 268일 = 연평균 27일,
+        #  그날 코스닥 평균 -2.26%). 첫 번째 지수는 학습 피처(index_chg)로도 기록.
+        self.regime_index = str(s.get("regime_index", "069500,229200"))
+        self.regime_indexes = [x.strip() for x in self.regime_index.split(",") if x.strip()]
         self.regime_min_chg = float(s.get("regime_min_chg", -1.5))  # 지수 등락률 이 미만이면 OFF
         self.use_model = bool(s.get("use_model", True))       # 학습모델로 후보 점수화
         self.min_pred_ret = float(s.get("min_pred_ret", -1.0))  # 예측수익 이 미만 후보 제외(-1=제외안함)
@@ -157,6 +169,39 @@ class SurgeBot:
             }
         if self.positions:
             log(f"이전 미청산 포지션 {len(self.positions)}개 복구")
+
+    def _load_avg_volumes(self) -> dict[str, float]:
+        """종목별 최근 20일 평균 거래량(일봉) — RVOL 분모. 시작 시 1회 로드.
+
+        일봉이 없는(신규상장 등) 종목은 빠지며, 그 경우 rvol=None 으로 기록만 빠진다.
+        """
+        try:
+            rows = self.store.conn.execute(
+                "SELECT symbol, AVG(volume) AS av FROM ("
+                "  SELECT symbol, volume,"
+                "         ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY date DESC) rn"
+                "  FROM daily_price WHERE date >= ("
+                "    SELECT strftime('%Y%m%d', date(substr(MAX(date),1,4) || '-' ||"
+                "           substr(MAX(date),5,2) || '-' || substr(MAX(date),7,2),"
+                "           '-45 days')) FROM daily_price)"
+                ") WHERE rn <= 20 GROUP BY symbol").fetchall()
+            return {r["symbol"]: float(r["av"]) for r in rows if r["av"]}
+        except Exception as e:  # 일봉 미수집 등 — RVOL 없이도 봇은 동작해야 한다
+            log(f"  RVOL 평균거래량 로드 실패(rvol 미기록): {e}")
+            return {}
+
+    def _attach_rvol(self, scanned: list[dict], now: datetime) -> None:
+        """후보에 상대거래량(rvol) 부착. 당일누적거래량을 '같은 시각까지의 평소
+        기대치(20일평균 × 장경과비율)'와 비교 — 절대 거래대금과 달리 종목 크기에
+        중립이라 '오늘 유난히 거래가 몰린' 종목을 포착한다."""
+        if not self._avg_vol:
+            return
+        elapsed_min = (now.hour - 9) * 60 + now.minute
+        frac = min(max(elapsed_min, 5), 390) / 390.0  # 정규장 09:00~15:30=390분
+        for r in scanned:
+            av = self._avg_vol.get(r["symbol"])
+            if av and av > 0:
+                r["rvol"] = round(r["volume"] / (av * frac), 3)
 
     # --- 스캔/필터 ----------------------------------------------------------
     def scan(self) -> list[dict]:
@@ -211,12 +256,25 @@ class SurgeBot:
                     f"OOS IC {meta.get('oos_ic')})")
         return self._model_bundle
 
-    def _index_change(self) -> float:
-        """시장 국면 프록시 지수 등락률%. 조회 실패 시 0(중립=매수 허용)."""
-        try:
-            return self.dom.index_change(self.regime_index)
-        except KISApiError:
-            return 0.0
+    def _index_change(self) -> tuple[float, float]:
+        """(첫 지수 등락률, 전체 중 최악 등락률)%. 조회 실패한 지수는 건너뛴다.
+
+        첫 값은 학습 피처(index_chg)용 — 과거 수집분(KODEX200 단일)과 의미 연속.
+        둘째 값은 국면 게이트용 — 추종 지수 중 하나(예: 코스닥)만 급락해도 차단.
+        전부 실패 시 (0,0) = 중립(매수 허용).
+        """
+        first: float | None = None
+        worst: float | None = None
+        for i, sym in enumerate(self.regime_indexes):
+            try:
+                ch = self.dom.index_change(sym)
+            except KISApiError:
+                continue
+            if i == 0:
+                first = ch
+            worst = ch if worst is None else min(worst, ch)
+        return (first if first is not None else 0.0,
+                worst if worst is not None else 0.0)
 
     def _capture_orderbook(self, candidates: list[dict], now: datetime) -> None:
         """상위 후보의 호가 잔량 임밸런스 수집(호출제한 위해 상위 N개만).
@@ -284,6 +342,8 @@ class SurgeBot:
                 primary = c.get("value", 0)
             elif self.rank_by == "rate":
                 primary = c.get("rate", 0.0)
+            elif self.rank_by == "rvol":
+                primary = c.get("rvol") or 0.0   # Stocks-in-Play: 상대거래량 상위 우선
             return (has, primary, c.get("value", 0))
         scored.sort(key=_key, reverse=True)
         candidates[:] = scored
@@ -300,6 +360,10 @@ class SurgeBot:
             if r["volume"] < self.min_volume:
                 continue
             if not (self.price_min <= r["price"] <= self.price_max):
+                continue
+            # 상대거래량 하한(opt-in): '평소만큼도 거래가 안 붙는' 종목 제외.
+            # rvol 미산출(일봉 없음 등)은 통과 — 데이터 결손이 매수를 막지 않게.
+            if self.min_rvol > 0 and r.get("rvol") is not None and r["rvol"] < self.min_rvol:
                 continue
             if r["symbol"] in self.positions or r["symbol"] in self.pending_buys:
                 continue
@@ -495,9 +559,10 @@ class SurgeBot:
         # 매수만 빈자리가 있을 때 한다. (스캔과 매수를 분리)
         held = held or {}
         scanned = self.scan()
-        idx_chg = self._index_change()               # 시장 국면(지수 등락률)
+        idx_chg, idx_worst = self._index_change()    # (피처용 KODEX200, 게이트용 최악지수)
         for r in scanned:
             r["index_chg"] = idx_chg                 # 학습 피처로 함께 저장
+        self._attach_rvol(scanned, now)              # 상대거래량(학습 피처 + 선택 필터)
         if scanned:
             self.store.save_surge_scan(now.strftime("%Y-%m-%d %H:%M:%S"), scanned)
         self._capture_rebound_orderbook(scanned, now)  # 하락 반등 후보 호가 수집(데이터용)
@@ -512,20 +577,21 @@ class SurgeBot:
         room = self.max_positions - len(self.positions) - len(self.pending_buys)
         if self.dry_run:
             tag = " · ML점수순" if self._model_bundle and self.use_model else ""
+            extra = f"(게이트 최저 {idx_worst:+.2f}%)" if idx_worst != idx_chg else ""
             log(f"  스캔 {len(scanned)}종목 · 필터 통과 {len(candidates)}종목 · "
-                f"빈자리 {room} · 지수 {idx_chg:+.2f}%{tag}")
+                f"빈자리 {room} · 지수 {idx_chg:+.2f}%{extra}{tag}")
         # 빈자리 없으면 매수만 건너뛴다(스캔·저장은 위에서 이미 완료 → 데이터는 계속 흐름).
         if room <= 0:
             return
-        # 지수 국면 필터: 시장이 급락 중이면 신규 매수 중단(데이터 수집·청산은 계속)
-        if self.regime_filter and idx_chg < self.regime_min_chg:
+        # 지수 국면 필터: 추종 지수 중 '최악'이 급락이면 신규 매수 중단(수집·청산은 계속)
+        if self.regime_filter and idx_worst < self.regime_min_chg:
             if not self._regime_off:   # 상태가 바뀔 때만 로그(도배 방지)
-                log(f"  🚫 지수 국면 OFF (지수 {idx_chg:+.2f}% < {self.regime_min_chg}%) "
+                log(f"  🚫 지수 국면 OFF (최저 지수 {idx_worst:+.2f}% < {self.regime_min_chg}%) "
                     f"— 신규 매수 중단")
                 self._regime_off = True
             return
         if self._regime_off:
-            log(f"  ✅ 지수 국면 복귀 (지수 {idx_chg:+.2f}%) — 매수 재개")
+            log(f"  ✅ 지수 국면 복귀 (최저 지수 {idx_worst:+.2f}%) — 매수 재개")
             self._regime_off = False
         for r in candidates[:room]:
             sym = r["symbol"]
@@ -561,7 +627,8 @@ class SurgeBot:
                     "entry_price": est_price, "qty": qty,
                     "entry_rate": r["rate"], "entry_volume": r["volume"],
                     "entry_rank": r.get("rank"), "entry_nscan": len(scanned),
-                    "entry_ob_imbalance": r.get("ob_imbalance")})
+                    "entry_ob_imbalance": r.get("ob_imbalance"),
+                    "entry_rvol": r.get("rvol")})
                 self.pending_buys[sym] = {
                     "trade_id": tid, "entry_rate": r["rate"], "volume": r["volume"],
                     "name": r["name"], "ts": now,

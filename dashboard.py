@@ -152,6 +152,53 @@ def ml_run(top_n: int, max_pool: int, hold_days: int = 20, embargo: int = 1) -> 
     return res
 
 
+# --- 해외 검증 팩터 변형 맞대결 (Track 1, DB만 읽음) ----------------------
+# 현행(60/5 모멘텀)을 기준으로, 조사한 해외 기법들을 같은 조건(top_n·국면·유니버스·
+# 기간)에서 백테스트해 한 표/한 차트로 비교한다. ⚠️ 전구간 백테스트는 인샘플이라
+# 좋아 보이기 쉽다 — 진짜 판정은 워크포워드(OOS). 52주 신고가가 그 대표 함정이었다.
+FACTOR_VARIANTS: list[tuple[str, dict]] = [
+    ("현행 (60/5 모멘텀)", {}),
+    ("12-1 모멘텀 (252/21)", {"mom_days": 252, "mom_skip": 21}),
+    ("120일 룩백", {"mom_days": 120, "mom_skip": 5}),
+    ("52주 신고가 (w=0.2)", {"_high52": 0.2}),
+    ("변동성 타기팅 12%", {"vol_target": 12.0}),
+]
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def factor_compare(top_n: int, max_pool: int, start_date: str) -> dict:
+    """팩터 변형별 전구간 백테스트(시리즈 1회 로드 후 재사용 → 빠름).
+
+    반환: {variants:[{name,metrics}], curves:{name:[...]}, dates:[...], bench:[...]}
+    """
+    from src.backtest import _load_series, run_backtest
+    from src.screener import WEIGHTS
+
+    with open_store() as store:
+        series = _load_series(store)
+        out_variants, out_curves, dates, bench = [], {}, None, None
+        for name, spec in FACTOR_VARIANTS:
+            kw = {k: v for k, v in spec.items() if not k.startswith("_")}
+            if "_high52" in spec:  # 모멘텀 가중에서 떼어 52주 신고가에 배분(합 1.0)
+                w = dict(WEIGHTS)
+                w["momentum"] = max(w.get("momentum", 0.0) - spec["_high52"], 0.0)
+                w["high_52w"] = spec["_high52"]
+                kw["weights"] = w
+            res = run_backtest(
+                store, top_n=top_n, max_pool=max_pool, regime_filter=True,
+                start_date=start_date, series=series, **kw)
+            if "error" in res:
+                continue
+            out_variants.append({"name": name, "metrics": res["metrics"]})
+            curve = res["curve"]
+            out_curves[name] = [p["strategy"] for p in curve]
+            if dates is None:  # 모든 변형이 같은 리밸런스/기간 → 첫 곡선 기준 정렬
+                dates = [p["date"] for p in curve]
+                bench = [p["benchmark"] for p in curve]
+    return {"variants": out_variants, "curves": out_curves,
+            "dates": dates or [], "bench": bench or []}
+
+
 @st.cache_data(ttl=120)
 def latest_universe() -> pd.DataFrame:
     with open_store() as store:
@@ -335,8 +382,8 @@ st.markdown(
     f"</div>", unsafe_allow_html=True)
 st.markdown(f"<div style='color:{GRAY};font-size:.85rem;margin-bottom:14px'>국내 단일 트랙 · 검증 중심</div>",
             unsafe_allow_html=True)
-tab_journal, tab_macro, tab_model, tab_collect, tab_data = st.tabs(
-    ["🧾 거래", "🌐 거시", "🤖 모델", "📡 수집", "🗂 데이터"])
+tab_journal, tab_macro, tab_model, tab_factor, tab_collect, tab_data = st.tabs(
+    ["🧾 거래", "🌐 거시", "🤖 모델", "🧪 팩터비교", "📡 수집", "🗂 데이터"])
 
 with tab_collect:
     collection_progress()
@@ -398,6 +445,75 @@ with tab_model:
             verdict = ("✅ ML이 모멘텀보다 위험효율(샤프) 우위" if ml_sh > mom_sh
                        else "⚠️ 이번 설정에선 ML이 모멘텀을 못 이김")
             st.info(f"{verdict}. (절대수익은 강세장 영향 → 상대비교가 핵심)")
+
+# --- 팩터 비교 탭 (해외 검증 기법 vs 현행, 같은 조건) ----------------------
+with tab_factor:
+    st.subheader("🧪 해외 검증 팩터 변형 맞대결 (Track 1)")
+    st.caption("조사한 해외 기법들(12-1 모멘텀 · 52주 신고가 · 변동성 타기팅 등)을 "
+               "현행(60/5 모멘텀)과 **같은 조건**(top N·국면필터·유니버스·기간)으로 백테스트해 비교합니다. "
+               "DB만 읽어 수집과 충돌 없음.")
+    fc1, fc2, fc3 = st.columns(3)
+    f_topn = fc1.slider("상위 N 종목", 5, 20, 10, key="f_topn")
+    f_pool = fc2.slider("유니버스(유동성 상위)", 100, 400, 200, step=50, key="f_pool")
+    f_start = fc3.text_input("시작일(YYYYMMDD)", "20170601", key="f_start",
+                             help="긴 룩백(252일)도 공평하게 비교되도록 워밍업 이후 공통 시작일로 정렬")
+    if st.button("▶ 팩터 비교 실행 (약 1~2분)"):
+        st.session_state["fc_go"] = (f_topn, f_pool, f_start.strip())
+
+    fgo = st.session_state.get("fc_go")
+    if not fgo:
+        st.info("버튼을 눌러 비교를 실행하세요. **현행이 기준선**이고, 나머지는 어제 조사한 "
+                "해외 기법들입니다. 결과는 캐시되어 재조회는 즉시.")
+    else:
+        with st.spinner("팩터 변형별 백테스트 중... (시리즈 1회 로드 후 재사용)"):
+            fres = factor_compare(fgo[0], fgo[1], fgo[2])
+        variants = fres["variants"]
+        if not variants:
+            st.warning("백테스트 결과가 없습니다. 유니버스를 늘리거나 시작일을 조정하세요.")
+        else:
+            base_sh = variants[0]["metrics"].get("sharpe", 0.0)  # 현행=기준선
+            # 비교 표(현행 대비 샤프 델타 포함)
+            table = []
+            for v in variants:
+                m = v["metrics"]
+                table.append({
+                    "전략": v["name"],
+                    "누적수익%": m.get("total_return", 0) * 100,
+                    "CAGR%": m.get("cagr", 0) * 100,
+                    "샤프": m.get("sharpe", 0),
+                    "vs현행Δ샤프": m.get("sharpe", 0) - base_sh,
+                    "MDD%": m.get("mdd", 0) * 100,
+                    "연변동성%": m.get("volatility", 0) * 100,
+                })
+            tdf = pd.DataFrame(table).set_index("전략")
+            st.dataframe(
+                tdf.style.format({
+                    "누적수익%": "{:+.0f}", "CAGR%": "{:+.1f}", "샤프": "{:.2f}",
+                    "vs현행Δ샤프": "{:+.2f}", "MDD%": "{:.0f}", "연변동성%": "{:.1f}"})
+                .background_gradient(subset=["샤프"], cmap="Blues"),
+                width="stretch")
+
+            # 누적수익 곡선(전략들 + 벤치마크)
+            cv = {name: vals for name, vals in fres["curves"].items()}
+            cv["벤치마크(KODEX200)"] = fres["bench"]
+            curve_df = pd.DataFrame(cv, index=pd.to_datetime(fres["dates"], format="%Y%m%d"))
+            st.subheader("누적수익 곡선 (1.0 = 시작)")
+            st.line_chart(curve_df)
+
+            # 정직성 경고 — 이 탭의 핵심 메시지
+            best = max(variants, key=lambda v: v["metrics"].get("sharpe", 0))
+            if best["name"] != variants[0]["name"]:
+                st.warning(
+                    f"⚠️ 전구간 백테스트에선 **{best['name']}**의 샤프가 현행보다 높아 보입니다. "
+                    "하지만 전구간 백테스트는 **인샘플이라 부풀려집니다**. 어제 워크포워드(OOS)로 "
+                    "검증했을 때 52주 신고가는 오히려 현행에 **역전 패배**했습니다(인샘플 함정). "
+                    "라이브 반영 전 반드시 워크포워드로 확인하세요:\n\n"
+                    "`python -m src.walkforward --w-high52 0.2`")
+            else:
+                st.success("✅ 이 설정에선 현행(60/5 모멘텀)이 전구간 백테스트에서도 최고 샤프입니다. "
+                           "현행 기본값 유지가 타당합니다.")
+            st.caption("※ 이건 전구간(인샘플) 백테스트입니다. 진짜 OOS 판정은 🤖 모델 탭의 "
+                       "워크포워드 또는 `python -m src.walkforward [옵션]` 으로.")
 
 # --- 거래 탭 (토스풍 2분할: 좌=타깃순위 / 우=내 투자) -----------------------
 with tab_journal:

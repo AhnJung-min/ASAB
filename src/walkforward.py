@@ -67,7 +67,9 @@ def _metrics_from_equity(eq: list[float], bench: list[float]) -> dict:
 
 
 def run_wf(store: DataStore, train_days=TRAIN_DAYS, test_days=TEST_DAYS,
-           max_pool=MAX_POOL, embargo=EMBARGO) -> dict:
+           max_pool=MAX_POOL, embargo=EMBARGO, fixed: dict | None = None) -> dict:
+    """fixed: 모든 폴드에 고정 적용할 run_backtest 추가 인자
+    (예: {"weights": {...}, "mom_days": 252} — 팩터 변형 A/B의 OOS 비교용)."""
     series = _load_series(store)
     if not series:
         return {"error": "데이터가 없습니다."}
@@ -87,7 +89,8 @@ def run_wf(store: DataStore, train_days=TRAIN_DAYS, test_days=TEST_DAYS,
 
     def bt(cfg, s, e):
         return run_backtest(store, hold_days=HOLD, cost_bps=COST, slippage_bps=SLIPPAGE,
-                            max_pool=max_pool, start_date=s, end_date=e, series=series, **cfg)
+                            max_pool=max_pool, start_date=s, end_date=e, series=series,
+                            **(fixed or {}), **cfg)
 
     fold_rows = []
     eq, beq = [1.0], [1.0]
@@ -147,10 +150,23 @@ def main() -> None:
     ap.add_argument("--max-pool", type=int, default=MAX_POOL)
     ap.add_argument("--embargo", type=int, default=EMBARGO,
                     help="train↔test 사이 비우는 거래일(누수 방지, 기본 20=보유기간)")
+    ap.add_argument("--mom-days", type=int, default=60, help="모멘텀 룩백 일수")
+    ap.add_argument("--mom-skip", type=int, default=5, help="모멘텀 스킵 일수")
+    ap.add_argument("--w-high52", type=float, default=0.0,
+                    help="52주 신고가 팩터 가중치(모멘텀 가중에서 차감). 팩터 변형 OOS 검증용")
     args = ap.parse_args()
 
+    fixed: dict = {"mom_days": args.mom_days, "mom_skip": args.mom_skip}
+    if args.w_high52 > 0:
+        from .screener import WEIGHTS
+        w = dict(WEIGHTS)
+        w["momentum"] = max(w.get("momentum", 0.0) - args.w_high52, 0.0)
+        w["high_52w"] = args.w_high52
+        fixed["weights"] = w
+
     store = DataStore()
-    res = run_wf(store, args.train_days, args.test_days, args.max_pool, args.embargo)
+    res = run_wf(store, args.train_days, args.test_days, args.max_pool, args.embargo,
+                 fixed=fixed)
     store.close()
     if "error" in res:
         print(res["error"])

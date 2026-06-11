@@ -3,10 +3,13 @@
 팩터(횡단면 비교):
   - rel_strength : 상대강도 = 종목 모멘텀 − 지수(KODEX200) 모멘텀.
                    시장 대비 강한 종목을 골라 베타(시장 추종)를 줄이고 알파를 포착.
-  - momentum : 최근 60영업일 수익률(직전 5일 제외 = 단기 반전 노이즈 제거)
+  - momentum : 최근 mom_days 영업일 수익률(직전 mom_skip 일 제외 = 단기 반전 노이즈 제거).
+               기본 60일/스킵5일. 학계 표준 12-1(약 230일/스킵20)은 백테스트 옵션으로 비교 가능.
   - trend    : 종가가 20일 이동평균 위에 있는지
   - liquidity: 최근 20일 평균 거래대금 (클수록 좋음)
   - low_vol  : 일간 수익률 변동성 (작을수록 좋음)
+  - high_52w : 52주(252일) 최고가 대비 현재가 비율 (George & Hwang 2004).
+               신고가 근접 종목이 이후에도 강세 — 가격 모멘텀과 별개 정보. 기본 0(opt-in).
 
 각 팩터를 백분위 순위로 환산해 가중 합산 -> 종합점수.
 ETF/ETN 등 재무비율이 없는 종목은 기본적으로 제외(개별주 위주).
@@ -33,6 +36,7 @@ WEIGHTS = {
     "trend": 0.20,
     "liquidity": 0.20,
     "low_vol": 0.20,
+    "high_52w": 0.0,
 }
 MIN_HISTORY = 60          # 최소 일봉 개수
 MIN_AVG_VALUE = 1_000_000_000  # 최소 평균 거래대금(원). 유동성 필터
@@ -50,7 +54,7 @@ def index_momentum(index_rows) -> float | None:
     return closes[-6] / closes[-61] - 1
 
 
-def compute_factors(rows) -> dict | None:
+def compute_factors(rows, mom_days: int = 60, mom_skip: int = 5) -> dict | None:
     if len(rows) < MIN_HISTORY:
         return None
     closes = [r["close"] for r in rows]
@@ -60,18 +64,25 @@ def compute_factors(rows) -> dict | None:
     if avg_value < MIN_AVG_VALUE:
         return None
 
-    # 모멘텀: 직전 5일 제외한 60일 수익률
-    momentum = closes[-6] / closes[-61] - 1 if len(closes) >= 61 else closes[-1] / closes[0] - 1
+    # 모멘텀: mom_days 일 전 → mom_skip 일 전 구간 수익률 (기본 60/5).
+    # 학계 12-1 = mom_days 252 / mom_skip 21 (P[t-21]/P[t-252]).
+    if len(closes) >= mom_days + 1:
+        momentum = closes[-1 - mom_skip] / closes[-1 - mom_days] - 1
+    else:
+        momentum = closes[-1] / closes[0] - 1
     ma20 = statistics.mean(closes[-20:])
     trend = 1.0 if closes[-1] > ma20 else 0.0
     rets = _returns(closes[-21:])
     vol = statistics.pstdev(rets) if len(rets) > 1 else 0.0
+    # 52주 신고가 근접도: 현재가 / 252일 최고가 (1.0=신고가). 데이터 짧으면 가용 구간.
+    high_52w = closes[-1] / max(closes[-252:])
 
     return {
         "momentum": momentum,
         "trend": trend,
         "liquidity": avg_value,
         "vol": vol,
+        "high_52w": high_52w,
         "last_close": closes[-1],
     }
 
@@ -88,27 +99,32 @@ def _percentile_rank(values: list[float]) -> list[float]:
     return ranks
 
 
-def assign_scores(candidates: list[dict]) -> list[dict]:
+def assign_scores(candidates: list[dict], weights: dict | None = None) -> list[dict]:
     """팩터 dict 리스트를 횡단면 백분위로 환산해 score 부여 후 내림차순 정렬.
 
     백테스트에서 '특정 시점의 후보들'에도 그대로 재사용한다.
+    weights 미지정 시 WEIGHTS(라이브 기본값) 사용 — 백테스트 A/B 비교용 주입 가능.
     """
     if not candidates:
         return []
+    w = weights or WEIGHTS
     # rel_strength 미설정 시 momentum 으로 대체(지수 데이터 없을 때 안전)
     rs = _percentile_rank([c.get("rel_strength", c["momentum"]) for c in candidates])
     mom = _percentile_rank([c["momentum"] for c in candidates])
     liq = _percentile_rank([c["liquidity"] for c in candidates])
     # 변동성은 낮을수록 좋으므로 부호 반전
     lowvol = _percentile_rank([-c["vol"] for c in candidates])
+    # 52주 신고가 근접도(구버전 캐시 호환: 없으면 momentum 백분위로 폴백)
+    h52 = _percentile_rank([c.get("high_52w", c["momentum"]) for c in candidates])
 
     for i, c in enumerate(candidates):
         c["score"] = (
-            WEIGHTS.get("rel_strength", 0.0) * rs[i]
-            + WEIGHTS.get("momentum", 0.0) * mom[i]
-            + WEIGHTS.get("trend", 0.0) * c["trend"]
-            + WEIGHTS.get("liquidity", 0.0) * liq[i]
-            + WEIGHTS.get("low_vol", 0.0) * lowvol[i]
+            w.get("rel_strength", 0.0) * rs[i]
+            + w.get("momentum", 0.0) * mom[i]
+            + w.get("trend", 0.0) * c["trend"]
+            + w.get("liquidity", 0.0) * liq[i]
+            + w.get("low_vol", 0.0) * lowvol[i]
+            + w.get("high_52w", 0.0) * h52[i]
         )
     candidates.sort(key=lambda c: c["score"], reverse=True)
     return candidates

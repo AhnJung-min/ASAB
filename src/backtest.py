@@ -66,7 +66,17 @@ def run_backtest(
     end_date: str | None = None,
     max_pool: int | None = None,
     series: dict[str, list[dict]] | None = None,
+    mom_days: int = 60,
+    mom_skip: int = 5,
+    weights: dict | None = None,
+    vol_target: float = 0.0,
+    vol_window: int = 60,
 ) -> dict[str, Any]:
+    """mom_days/mom_skip: 모멘텀 룩백(기본 60/5, 학계 12-1은 230/20).
+    weights: 팩터 가중치 주입(None=screener.WEIGHTS). 예: {"high_52w":0.2,...}
+    vol_target: 연환산 목표 변동성 %(예 12). 0=비활성. 실현변동성이 목표를 넘으면
+      노출(exposure)을 목표/실현 비율로 줄인다(레버리지 없음, 상한 1.0).
+      Barroso & Santa-Clara(2015) 'Momentum Has Its Moments' 방식의 보수적 변형."""
     # series 를 외부에서 주입하면 재로딩 생략(워크포워드에서 반복 호출 시 성능)
     if series is None:
         series = _load_series(store)
@@ -135,13 +145,13 @@ def run_backtest(
         return bisect.bisect_right(bdates, t) - 1  # t 이하 마지막 지수 거래일
 
     def index_mom_asof(t: str) -> float | None:
-        """t시점 지수 모멘텀(직전5일 제외 60일). 미래정보 누출 없음."""
+        """t시점 지수 모멘텀(종목과 동일: 직전 mom_skip 제외 mom_days). 누출 없음."""
         if not has_bench:
             return None
         pos = _bench_pos(t)
-        if pos < 60:
+        if pos < mom_days:
             return None
-        return bcloses[pos - 5] / bcloses[pos - 60] - 1
+        return bcloses[pos - mom_skip] / bcloses[pos - mom_days] - 1
 
     # 시장국면(레짐): 지수가 N일선 위면 risk-on(투자). t 이하 종가만 사용.
     regime_on: dict[str, bool] = {}
@@ -168,11 +178,17 @@ def run_backtest(
     curve: list[dict] = []
     holdings_log: list[dict] = []
 
-    # 워밍업(60) 또는 start_date 중 늦은 쪽에서 매매 시작
-    start_i = 60
+    # 워밍업(모멘텀 룩백 충족) 또는 start_date 중 늦은 쪽에서 매매 시작
+    start_i = max(60, mom_days)
     if start_date:
         start_i = max(start_i, bisect.bisect_left(dates, start_date))
     prev_holdings: list[str] = []
+
+    # 변동성 타기팅: 전략 자체의 일별 수익률(노출 1.0 기준)로 실현변동성 추정
+    vt = (vol_target / 100.0) if vol_target and vol_target > 0 else 0.0
+    strat_rets: list[float] = []   # 일별 원수익률 기록(타기팅 입력)
+    scaled_equity = 1.0            # 노출 조절 적용 자본곡선
+    exposure = 1.0
 
     i = start_i
     while i < len(dates):
@@ -190,14 +206,14 @@ def run_backtest(
             if end_idx < 60:
                 continue
             rows_asof = series[s][: end_idx + 1]
-            f = compute_factors(rows_asof)
+            f = compute_factors(rows_asof, mom_days=mom_days, mom_skip=mom_skip)
             if f is None:
                 continue
             f["symbol"] = s
             f["rel_strength"] = (f["momentum"] - idx_mom_t) if idx_mom_t is not None else f["momentum"]
             candidates.append(f)
 
-        ranked = assign_scores(candidates)
+        ranked = assign_scores(candidates, weights=weights)
         picks = [c["symbol"] for c in ranked[:top_n]]
 
         # 시장국면 필터: risk-off 면 현금 보유(picks 비움)
@@ -213,9 +229,20 @@ def run_backtest(
             avg_slip = sum(slip * slip_mult_asof(s, t) for s in traded) / len(traded)
         else:
             avg_slip = 0.0
+        # 변동성 타기팅: '직전까지'의 실현변동성으로 이번 구간 노출 결정(누출 없음)
+        if vt > 0:
+            win = strat_rets[-vol_window:]
+            if len(win) >= 20:
+                mu = sum(win) / len(win)
+                var_d = max(sum((r - mu) ** 2 for r in win) / len(win), 0.0)
+                rv = math.sqrt(var_d) * math.sqrt(252)
+                exposure = min(1.0, vt / rv) if rv > 1e-9 else 1.0
+
         slip_rate = avg_slip * turnover
         slippage_drag += slip_rate
         equity *= (1 - cost * turnover - slip_rate)
+        # 타기팅 곡선: 비용도 노출 비율만큼만 부담(투자분에만 발생)
+        scaled_equity *= (1 - (cost * turnover + slip_rate) * exposure)
         prev_holdings = picks
 
         holdings_log.append({"date": t, "picks": picks,
@@ -246,6 +273,7 @@ def run_backtest(
 
         for k in range(i + 1, j_end + 1):
             d = dates[k]
+            port_before = prev_port  # 일별 원수익률 산출용(변동성 타기팅 입력)
             if use_exit:
                 # 종목별 자본 갱신 + 손절/트레일링 청산(이후 현금=배수 고정)
                 for s in picks:
@@ -276,13 +304,19 @@ def run_backtest(
                         last_close[s] = c1
                 if rets:
                     prev_port *= (1 + sum(rets) / len(rets))
+            # 변동성 타기팅: 일별 수익률 기록 + 노출 조절 곡선 갱신
+            r_day = (prev_port / port_before - 1) if port_before else 0.0
+            strat_rets.append(r_day)
+            scaled_equity *= (1 + exposure * r_day)
             # 벤치마크
             if bench_last:
                 bc = close_by.get(BENCHMARK_SYMBOL, {}).get(d)
                 if bc:
                     prev_bench *= (bc / bench_last)
                     bench_last = bc
-            curve.append({"date": d, "strategy": prev_port, "benchmark": prev_bench})
+            curve.append({"date": d,
+                          "strategy": (scaled_equity if vt > 0 else prev_port),
+                          "benchmark": prev_bench})
 
         window = j_end - i
         span_days += window
@@ -305,6 +339,8 @@ def run_backtest(
             "slippage_bps": slippage_bps, "stop_loss_pct": stop_loss_pct,
             "trailing_pct": trailing_pct,
             "regime_filter": regime_filter, "regime_ma": regime_ma,
+            "mom_days": mom_days, "mom_skip": mom_skip,
+            "weights": weights, "vol_target": vol_target,
         },
         "pool_size": len(pool),
         "has_benchmark": BENCHMARK_SYMBOL in series,
@@ -363,7 +399,22 @@ def main() -> None:
     ap.add_argument("--regime-filter", action="store_true",
                     help="지수 이동평균 아래면 현금 보유(시장국면 필터)")
     ap.add_argument("--regime-ma", type=int, default=200, help="국면 판정 이동평균 일수")
+    ap.add_argument("--start-date", type=str, default=None, help="매매 시작일(YYYYMMDD)")
+    ap.add_argument("--mom-days", type=int, default=60, help="모멘텀 룩백 일수(학계 12-1은 230)")
+    ap.add_argument("--mom-skip", type=int, default=5, help="모멘텀 스킵 일수(12-1은 20)")
+    ap.add_argument("--w-high52", type=float, default=0.0,
+                    help="52주 신고가 근접 팩터 가중치(예 0.2). 모멘텀 가중에서 차감")
+    ap.add_argument("--vol-target", type=float, default=0.0,
+                    help="연 목표변동성 %%(예 12). 실현변동성 초과 시 노출 축소. 0=OFF")
     args = ap.parse_args()
+
+    # --w-high52 지정 시: 모멘텀 가중에서 그만큼 떼어 52주 신고가에 배분(합 1.0 유지)
+    weights = None
+    if args.w_high52 > 0:
+        from .screener import WEIGHTS
+        weights = dict(WEIGHTS)
+        weights["momentum"] = max(weights.get("momentum", 0.0) - args.w_high52, 0.0)
+        weights["high_52w"] = args.w_high52
 
     store = DataStore()
     res = run_backtest(
@@ -373,6 +424,9 @@ def main() -> None:
         max_pool=(args.max_pool or None),
         require_financials=not args.include_etf,
         regime_filter=args.regime_filter, regime_ma=args.regime_ma,
+        start_date=args.start_date,
+        mom_days=args.mom_days, mom_skip=args.mom_skip,
+        weights=weights, vol_target=args.vol_target,
     )
     store.close()
 
