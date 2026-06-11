@@ -107,6 +107,10 @@ surge:
   # 종목(RVOL≥1 상위, Stocks in Play)으로 제한할 때만 단타 수익이 유의미.
   # 0=필터 끔(피처 기록만). rvol 데이터가 쌓여 국내에서도 확인되면 1.0 권장.
   min_rvol: 0.0
+  # VWAP 위에서만 매수(해외 ORB 봇 표준 룰: 현재가>당일VWAP = 평균 체결가가 지지).
+  # vwap_dev(현재가/VWAP-1)는 항상 피처로 기록됨(스캔 응답으로 산출, 추가호출 없음).
+  # 기본 OFF — 데이터가 쌓여 국내에서도 효과가 확인되면 true 권장.
+  require_above_vwap: false
   reentry_cooldown_min: 10 # 판 종목 재매수 금지(분) — 같은 종목 churn 방지
   ob_capture_top: 10      # 호가 잔량 임밸런스 수집(=매수 후보 풀) 상위 N (호출제한↔거래활성)
 

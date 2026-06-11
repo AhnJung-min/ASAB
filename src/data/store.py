@@ -166,8 +166,10 @@ CREATE TABLE IF NOT EXISTS surge_scan (
     rank   INTEGER,         -- 순위(학습 피처)
     source TEXT,            -- 후보 출처: rate(등락률) | value(거래대금)
     index_chg REAL,         -- 그 시점 지수(KODEX200) 등락률%(시장국면 피처)
-    rvol   REAL             -- 상대거래량 = 당일누적/(20일평균×장경과비율). 'Stocks in Play'
+    rvol   REAL,            -- 상대거래량 = 당일누적/(20일평균×장경과비율). 'Stocks in Play'
                             -- 선정 근거(Zarattini·Barbon·Aziz 2024). 학습 피처
+    vwap_dev REAL           -- 현재가/당일VWAP - 1. 해외 ORB 봇 표준 필터(VWAP 위=롱만).
+                            -- VWAP = 누적거래대금/누적거래량(스캔 응답으로 산출, 추가호출 없음)
 );
 CREATE INDEX IF NOT EXISTS idx_surge_scan_ts ON surge_scan(ts);
 CREATE INDEX IF NOT EXISTS idx_surge_scan_sym ON surge_scan(symbol, ts);
@@ -180,6 +182,7 @@ CREATE TABLE IF NOT EXISTS surge_trade (
     entry_rank INTEGER, entry_nscan INTEGER,   -- 진입 시점 순위·동시급등 종목수(학습 피처)
     entry_ob_imbalance REAL,                   -- 진입 시점 호가 잔량 임밸런스(학습 피처)
     entry_rvol REAL,                           -- 진입 시점 상대거래량(학습 피처)
+    entry_vwap_dev REAL,                       -- 진입 시점 현재가/VWAP-1(학습 피처)
     peak_price REAL,                           -- 트레일링 고점(재시작 시 복원용)
     exit_ts TEXT, exit_price REAL,
     pnl REAL, pnl_pct REAL, reason TEXT, hold_sec INTEGER,
@@ -247,12 +250,13 @@ class DataStore:
         # 학습 피처 컬럼 추가(구 DB 보강) — 기존 데이터 보존
         self._add_columns("surge_scan",
                           {"rank": "INTEGER", "source": "TEXT", "index_chg": "REAL",
-                           "rvol": "REAL"})
+                           "rvol": "REAL", "vwap_dev": "REAL"})
         self._add_columns("surge_trade",
                           {"entry_rank": "INTEGER", "entry_nscan": "INTEGER",
                            "entry_ob_imbalance": "REAL",
                            "peak_price": "REAL",   # 트레일링 고점(재시작 시 복원용)
-                           "entry_rvol": "REAL"})  # 진입 시점 상대거래량(학습 피처)
+                           "entry_rvol": "REAL",   # 진입 시점 상대거래량(학습 피처)
+                           "entry_vwap_dev": "REAL"})  # 진입 시점 VWAP 괴리(학습 피처)
 
     def _add_columns(self, table: str, cols: dict[str, str]) -> None:
         cur = self.conn.execute(
@@ -548,11 +552,11 @@ class DataStore:
     def save_surge_scan(self, ts: str, rows: Iterable[dict[str, Any]]) -> int:
         data = [(ts, r.get("market", ""), r["symbol"], r["name"], r["price"],
                  r["rate"], r["volume"], r.get("rank"), r.get("source"),
-                 r.get("index_chg"), r.get("rvol")) for r in rows]
+                 r.get("index_chg"), r.get("rvol"), r.get("vwap_dev")) for r in rows]
         self.conn.executemany(
             "INSERT INTO surge_scan "
-            "(ts,market,symbol,name,price,rate,volume,rank,source,index_chg,rvol) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?)", data)
+            "(ts,market,symbol,name,price,rate,volume,rank,source,index_chg,rvol,vwap_dev) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", data)
         self.conn.commit()
         return len(data)
 
@@ -560,12 +564,12 @@ class DataStore:
         cur = self.conn.execute(
             "INSERT INTO surge_trade "
             "(symbol,name,market,entry_ts,entry_price,qty,entry_rate,entry_volume,"
-            "entry_rank,entry_nscan,entry_ob_imbalance,entry_rvol,status) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'open')",
+            "entry_rank,entry_nscan,entry_ob_imbalance,entry_rvol,entry_vwap_dev,status) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'open')",
             (t["symbol"], t["name"], t.get("market", ""), t["entry_ts"],
              t["entry_price"], t["qty"], t.get("entry_rate"), t.get("entry_volume"),
              t.get("entry_rank"), t.get("entry_nscan"), t.get("entry_ob_imbalance"),
-             t.get("entry_rvol")))
+             t.get("entry_rvol"), t.get("entry_vwap_dev")))
         self.conn.commit()
         return cur.lastrowid
 

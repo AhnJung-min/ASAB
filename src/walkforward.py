@@ -154,9 +154,13 @@ def main() -> None:
     ap.add_argument("--mom-skip", type=int, default=5, help="모멘텀 스킵 일수")
     ap.add_argument("--w-high52", type=float, default=0.0,
                     help="52주 신고가 팩터 가중치(모멘텀 가중에서 차감). 팩터 변형 OOS 검증용")
+    ap.add_argument("--skip-top", type=int, default=0,
+                    help="유동성 최상위 N종목 제외(universe shrinkage 검증, 0=끔)")
     args = ap.parse_args()
 
     fixed: dict = {"mom_days": args.mom_days, "mom_skip": args.mom_skip}
+    if args.skip_top > 0:
+        fixed["skip_top"] = args.skip_top
     if args.w_high52 > 0:
         from .screener import WEIGHTS
         w = dict(WEIGHTS)

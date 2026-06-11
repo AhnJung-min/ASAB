@@ -122,6 +122,9 @@ class SurgeBot:
         # (Zarattini·Barbon·Aziz 2024, 미국 7천종목 2016~2023: RVOL≥1 상위로 제한할
         # 때만 유의미한 수익). 0=필터 끔(수집만). 켜려면 예: min_rvol: 1.0
         self.min_rvol = float(s.get("min_rvol", 0.0))
+        # VWAP 위에서만 매수(해외 ORB 봇 표준 룰). 기본 OFF — vwap_dev 데이터가
+        # 쌓여 국내에서도 효과가 확인되면 켜는 것을 권장(검증의 정직성 원칙).
+        self.require_above_vwap = bool(s.get("require_above_vwap", False))
         self._avg_vol: dict[str, float] = self._load_avg_volumes()
         # === 하락 반등 데이터 수집 (수집 전용 — 매수는 안 함) ===
         # 하락률 상위 종목도 스캔해 surge_scan 에 적재(source='rebound'). 음수 등락률이라
@@ -202,6 +205,20 @@ class SurgeBot:
             av = self._avg_vol.get(r["symbol"])
             if av and av > 0:
                 r["rvol"] = round(r["volume"] / (av * frac), 3)
+
+    @staticmethod
+    def _attach_vwap_dev(scanned: list[dict]) -> None:
+        """후보에 VWAP 괴리(vwap_dev = 현재가/당일VWAP - 1) 부착.
+
+        VWAP = 누적거래대금/누적거래량 — 스캔 응답(value, volume)만으로 산출(추가
+        API 호출 없음). 해외 ORB 봇 표준 룰 'VWAP 위에서만 롱'(매수세가 평균
+        체결가를 지지)의 피처화. value 없는 응답(등락률 순위 일부)은 미기록."""
+        for r in scanned:
+            val, vol = r.get("value") or 0, r.get("volume") or 0
+            if val > 0 and vol > 0 and r.get("price"):
+                vwap = val / vol
+                if vwap > 0:
+                    r["vwap_dev"] = round(r["price"] / vwap - 1, 5)
 
     # --- 스캔/필터 ----------------------------------------------------------
     def scan(self) -> list[dict]:
@@ -364,6 +381,9 @@ class SurgeBot:
             # 상대거래량 하한(opt-in): '평소만큼도 거래가 안 붙는' 종목 제외.
             # rvol 미산출(일봉 없음 등)은 통과 — 데이터 결손이 매수를 막지 않게.
             if self.min_rvol > 0 and r.get("rvol") is not None and r["rvol"] < self.min_rvol:
+                continue
+            # VWAP 아래(평균 체결가가 저항) 후보 제외(opt-in). 미산출(None)은 통과.
+            if self.require_above_vwap and (r.get("vwap_dev") or 0) < 0:
                 continue
             if r["symbol"] in self.positions or r["symbol"] in self.pending_buys:
                 continue
@@ -563,6 +583,7 @@ class SurgeBot:
         for r in scanned:
             r["index_chg"] = idx_chg                 # 학습 피처로 함께 저장
         self._attach_rvol(scanned, now)              # 상대거래량(학습 피처 + 선택 필터)
+        self._attach_vwap_dev(scanned)               # VWAP 괴리(학습 피처 + 선택 필터)
         if scanned:
             self.store.save_surge_scan(now.strftime("%Y-%m-%d %H:%M:%S"), scanned)
         self._capture_rebound_orderbook(scanned, now)  # 하락 반등 후보 호가 수집(데이터용)
@@ -628,7 +649,8 @@ class SurgeBot:
                     "entry_rate": r["rate"], "entry_volume": r["volume"],
                     "entry_rank": r.get("rank"), "entry_nscan": len(scanned),
                     "entry_ob_imbalance": r.get("ob_imbalance"),
-                    "entry_rvol": r.get("rvol")})
+                    "entry_rvol": r.get("rvol"),
+                    "entry_vwap_dev": r.get("vwap_dev")})
                 self.pending_buys[sym] = {
                     "trade_id": tid, "entry_rate": r["rate"], "volume": r["volume"],
                     "name": r["name"], "ts": now,

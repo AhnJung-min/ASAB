@@ -65,6 +65,7 @@ def run_backtest(
     start_date: str | None = None,
     end_date: str | None = None,
     max_pool: int | None = None,
+    skip_top: int = 0,
     series: dict[str, list[dict]] | None = None,
     mom_days: int = 60,
     mom_skip: int = 5,
@@ -76,7 +77,9 @@ def run_backtest(
     weights: 팩터 가중치 주입(None=screener.WEIGHTS). 예: {"high_52w":0.2,...}
     vol_target: 연환산 목표 변동성 %(예 12). 0=비활성. 실현변동성이 목표를 넘으면
       노출(exposure)을 목표/실현 비율로 줄인다(레버리지 없음, 상한 1.0).
-      Barroso & Santa-Clara(2015) 'Momentum Has Its Moments' 방식의 보수적 변형."""
+      Barroso & Santa-Clara(2015) 'Momentum Has Its Moments' 방식의 보수적 변형.
+    skip_top: 유동성 최상위 N종목을 유니버스에서 제외(초대형주가 모멘텀을 방해한다는
+      한국시장 연구(arXiv:1211.6517 universe shrinkage) 검증용). 0=비활성."""
     # series 를 외부에서 주입하면 재로딩 생략(워크포워드에서 반복 호출 시 성능)
     if series is None:
         series = _load_series(store)
@@ -97,9 +100,12 @@ def run_backtest(
         if (not require_financials or s in master_set) and len(series[s]) >= 61
     ]
     # 유동성(시총) 상위로 제한 → 의미있는 유니버스 + 속도
-    if max_pool and len(pool) > max_pool:
+    if (max_pool and len(pool) > max_pool) or skip_top:
         pool.sort(key=lambda s: liq_of.get(s, 0), reverse=True)
-        pool = pool[:max_pool]
+        if skip_top:
+            pool = pool[skip_top:]
+        if max_pool and len(pool) > max_pool:
+            pool = pool[:max_pool]
     if len(pool) < top_n:
         return {
             "error": f"백테스트 대상 종목이 부족합니다(개별주 {len(pool)}개 < top_n {top_n}). "
@@ -393,6 +399,8 @@ def main() -> None:
                     help="보유중 손절 %% (예: 8). 0=비활성. 켜면 손절분은 현금화")
     ap.add_argument("--trailing-pct", type=float, default=0.0,
                     help="보유중 고점 대비 트레일링스톱 %% (예: 15). 0=비활성")
+    ap.add_argument("--skip-top", type=int, default=0,
+                    help="유동성 최상위 N종목 제외(universe shrinkage 검증, 0=끔)")
     ap.add_argument("--max-pool", type=int, default=0,
                     help="유동성 상위 N종목으로 유니버스 제한(0=전체)")
     ap.add_argument("--include-etf", action="store_true")
@@ -421,7 +429,7 @@ def main() -> None:
         store, top_n=args.top_n, hold_days=args.hold_days,
         cost_bps=args.cost_bps, slippage_bps=args.slippage_bps,
         stop_loss_pct=args.stop_loss_pct, trailing_pct=args.trailing_pct,
-        max_pool=(args.max_pool or None),
+        max_pool=(args.max_pool or None), skip_top=args.skip_top,
         require_financials=not args.include_etf,
         regime_filter=args.regime_filter, regime_ma=args.regime_ma,
         start_date=args.start_date,

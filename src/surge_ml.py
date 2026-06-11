@@ -44,7 +44,7 @@ MODEL_PATH = Path("data") / "surge_model.pkl"
 # rvol(상대거래량)은 'Stocks in Play' 근거(Zarattini 외 2024) — 구 데이터는 NaN
 # (Ridge는 Imputer, LightGBM은 네이티브로 결측 처리. 구 모델은 자기 피처목록 사용).
 FEATURES = ["rate", "log_volume", "log_price", "hour", "weekday", "rank",
-            "n_scan", "ob_imbalance", "index_chg", "rvol"]
+            "n_scan", "ob_imbalance", "index_chg", "rvol", "vwap_dev"]
 
 MIN_SAMPLES = 300        # 선형모델 최소 표본(이 미만이면 학습 거부)
 LGBM_MIN = 3000          # LightGBM(트리)은 이만큼 모여야 — 소데이터엔 과적합
@@ -59,7 +59,8 @@ _TOL = timedelta(seconds=120)   # forward 가격 매칭 허용오차(폴링 30s 
 def feat_row(rate: float, volume: float, price: float, rank: int | None,
              n_scan: int, t: datetime, ob_imbalance: float | None = None,
              index_chg: float | None = None,
-             rvol: float | None = None) -> dict[str, float]:
+             rvol: float | None = None,
+             vwap_dev: float | None = None) -> dict[str, float]:
     """피처 한 행. 라이브 후보와 과거 스캔이 같은 식으로 만들어져야 한다."""
     return {
         "rate": float(rate),
@@ -72,6 +73,7 @@ def feat_row(rate: float, volume: float, price: float, rank: int | None,
         "ob_imbalance": float(ob_imbalance) if ob_imbalance is not None else float("nan"),
         "index_chg": float(index_chg) if index_chg is not None else float("nan"),
         "rvol": float(rvol) if rvol is not None else float("nan"),
+        "vwap_dev": float(vwap_dev) if vwap_dev is not None else float("nan"),
     }
 
 
@@ -111,7 +113,7 @@ def build_scan_dataset(store: DataStore, horizon_min: int = DEFAULT_HORIZON_MIN,
     obmap = store.orderbook_map()
     mtl = store.minute_timeline()
     rows = store.conn.execute(
-        "SELECT ts,symbol,name,price,rate,volume,rank,index_chg,rvol "
+        "SELECT ts,symbol,name,price,rate,volume,rank,index_chg,rvol,vwap_dev "
         "FROM surge_scan ORDER BY ts"
     ).fetchall()
     recs = []
@@ -125,7 +127,7 @@ def build_scan_dataset(store: DataStore, horizon_min: int = DEFAULT_HORIZON_MIN,
         recs.append({"t": t, "symbol": r["symbol"], "price": float(r["price"]),
                      "rate": float(r["rate"] or 0), "volume": float(r["volume"] or 0),
                      "rank": r["rank"], "index_chg": r["index_chg"],
-                     "rvol": r["rvol"]})
+                     "rvol": r["rvol"], "vwap_dev": r["vwap_dev"]})
     # symbol별 가격 타임라인 / ts별 동시급등 종목수
     timeline: dict[str, list[tuple[datetime, float]]] = defaultdict(list)
     nscan: dict[datetime, int] = defaultdict(int)
@@ -150,7 +152,8 @@ def build_scan_dataset(store: DataStore, horizon_min: int = DEFAULT_HORIZON_MIN,
         ts_str = x["t"].strftime("%Y-%m-%d %H:%M:%S")
         ob = obmap.get((ts_str, x["symbol"]))
         row = feat_row(x["rate"], x["volume"], x["price"], x["rank"],
-                       nscan[x["t"]], x["t"], ob, x.get("index_chg"), x.get("rvol"))
+                       nscan[x["t"]], x["t"], ob, x.get("index_chg"), x.get("rvol"),
+                       x.get("vwap_dev"))
         row.update(fwd_ret=fwd, symbol=x["symbol"], ts=ts_str, src=src)
         out.append(row)
     return out
@@ -169,7 +172,9 @@ def build_trade_dataset(store: DataStore) -> list[dict[str, Any]]:
             continue
         row = feat_row(r["entry_rate"], r["entry_volume"] or 0, r["entry_price"],
                        r["entry_rank"], r["entry_nscan"] or 1, t, r["entry_ob_imbalance"],
-                       rvol=(r["entry_rvol"] if "entry_rvol" in r.keys() else None))
+                       rvol=(r["entry_rvol"] if "entry_rvol" in r.keys() else None),
+                       vwap_dev=(r["entry_vwap_dev"]
+                                 if "entry_vwap_dev" in r.keys() else None))
         row.update(pnl_pct=(r["pnl_pct"] or 0) / 100.0,
                    win=1 if r["reason"] == "익절" else 0, name=r["name"])
         out.append(row)
@@ -258,7 +263,8 @@ def score_candidates(bundle: dict, candidates: list[dict[str, Any]],
     model, feats = bundle["model"], bundle["features"]
     for c in candidates:
         f = feat_row(c["rate"], c["volume"], c["price"], c.get("rank"), n_scan, t,
-                     c.get("ob_imbalance"), c.get("index_chg"), c.get("rvol"))
+                     c.get("ob_imbalance"), c.get("index_chg"), c.get("rvol"),
+                     c.get("vwap_dev"))
         X = np.array([[f[k] for k in feats]], dtype=float)
         c["ml_score"] = float(model.predict(X)[0])
 
