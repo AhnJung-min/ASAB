@@ -30,6 +30,7 @@ from pathlib import Path
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")  # Windows 콘솔 한글 깨짐 방지
 
+import requests
 import yaml
 
 from .data.store import DataStore
@@ -407,6 +408,11 @@ class SurgeBot:
             if e.code != "EGW00201":
                 log(f"잔고 조회 오류: {e}")
             return
+        except requests.exceptions.RequestException as e:
+            # 서버 지연·끊김(재시도 6회 모두 타임아웃 등)도 이번 주기만 건너뛰고 복구.
+            # 무인 운행 중 일시적 네트워크 장애로 봇 전체가 죽지 않게 한다.
+            log(f"잔고 조회 네트워크 오류(이번 주기 건너뜀): {e}")
+            return
         held = {h["symbol"]: h for h in bal["holdings"]}
         if self.dry_run:
             # 주문·DB 변경 없이 스캔→필터→매수신호만 점검(보유 인수도 안 함)
@@ -677,7 +683,14 @@ class SurgeBot:
             return  # --once / --dry-run 은 1주기만
         try:
             while True:
-                self.tick()
+                try:
+                    self.tick()
+                except KeyboardInterrupt:
+                    raise
+                except Exception as e:  # noqa: BLE001
+                    # 무인 운행 안전망: 한 주기에서 예상 못 한 오류가 나도 봇을 죽이지
+                    # 않고 다음 주기에 복구를 시도한다(네트워크·서버·일시 예외 전반).
+                    log(f"⚠️ 주기 처리 오류(다음 주기 재시도): {e}")
                 if until and datetime.now().strftime("%H:%M") >= until:
                     log(f"⏰ {until} 도달 — 봇을 종료합니다.")
                     self._report()
