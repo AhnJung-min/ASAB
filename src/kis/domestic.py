@@ -28,17 +28,33 @@ class DomesticStock:
         )
         return int(data["output"]["stck_prpr"])
 
-    def index_change(self, symbol: str = "069500", market: str = "J") -> float:
-        """시장 국면 프록시(기본 KODEX200)의 당일 등락률%. 지수 급락 시 방어용."""
-        data = self.c.get(
-            "/uapi/domestic-stock/v1/quotations/inquire-price",
-            tr_id="FHKST01010100",
-            params={"FID_COND_MRKT_DIV_CODE": market, "FID_INPUT_ISCD": symbol},
-        )
-        try:
-            return float(data["output"]["prdy_ctrt"])
-        except (KeyError, ValueError, TypeError):
-            return 0.0
+    def index_change(self, symbol: str = "069500") -> float:
+        """시장 국면 프록시의 당일 등락률%.
+
+        - 종목코드 6자리(ETF 등): 주가 시세 API(FHKST01010100, market=J)
+        - 지수코드 4자리(0001=코스피 / 1001=코스닥): 지수 시세 API(FHPUP02100000, market=U)
+          → ETF NAV 괴리 없이 순수 지수 등락률을 반환한다.
+        """
+        if len(symbol) == 4:  # 지수코드: 코스피(0001), 코스닥(1001) 등
+            data = self.c.get(
+                "/uapi/domestic-stock/v1/quotations/inquire-index-price",
+                tr_id="FHPUP02100000",
+                params={"FID_COND_MRKT_DIV_CODE": "U", "FID_INPUT_ISCD": symbol},
+            )
+            try:
+                return float(data["output"]["bstp_nmix_prdy_ctrt"])
+            except (KeyError, ValueError, TypeError):
+                return 0.0
+        else:  # ETF·종목코드
+            data = self.c.get(
+                "/uapi/domestic-stock/v1/quotations/inquire-price",
+                tr_id="FHKST01010100",
+                params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": symbol},
+            )
+            try:
+                return float(data["output"]["prdy_ctrt"])
+            except (KeyError, ValueError, TypeError):
+                return 0.0
 
     def order_book(self, symbol: str, market: str = "J") -> dict[str, Any]:
         """호가창(매수/매도 잔량) 조회. 단타 핵심 피처=잔량 임밸런스.
